@@ -1,5 +1,5 @@
 // The dashboard's method sheet: the fitted model, its out-of-sample record, the coverage
-// funnel and the top of the board, written from the same data the page renders. The program
+// ledger and the top of the board, written from the same data the page renders. The program
 // drops this file into the dossier's dashboard as 00-method.md, so it sorts first among the
 // dashboard's source files and survives the judge's text cap.
 
@@ -12,7 +12,7 @@ const f4 = (n: number): string => (Math.abs(n) >= 100 ? n.toFixed(1) : n.toFixed
 
 /** One row of the markdown table at the top of the board. */
 function rowLine(row: BoardRow): string {
-  return `| ${row.rank} | ${row.name} | ${row.category ?? '—'} | ${millions(row.tvl_usd)} | ${millions(row.launch_value_usd)} | ${pct(row.odds_12m)} | ${millions(row.implied_value_usd)} | ${row.per_hour_usd >= 0 ? '$' : '−$'}${Math.abs(row.per_hour_usd).toFixed(1)}/h | ${row.verdict} |`;
+  return `| ${row.rank} | ${row.name} | ${row.category ?? '—'} | ${millions(row.tvl_usd)} | ${millions(row.launch_value_usd)} | ${pct(row.odds_eventual)} | ${millions(row.implied_value_usd)} | ${millions(row.implied_low_usd)}–${millions(row.implied_high_usd)} | ${row.per_hour_usd >= 0 ? '$' : '−$'}${Math.abs(row.per_hour_usd).toFixed(1)}/h | ${row.verdict} |`;
 }
 
 /** The whole method sheet. */
@@ -22,6 +22,7 @@ export function methodMarkdown(radar: RadarData): string {
   const o = radar.odds;
   const e = radar.economics;
   const cov = radar.coverage;
+  const acc = radar.accounting;
   const effects = Object.entries(c.category_effects).sort((a, b) => b[1] - a[1]);
   const fetched = /fetched\s+([0-9T:.Z-]+)/.exec(radar.source);
   const lines: string[] = [];
@@ -52,7 +53,7 @@ export function methodMarkdown(radar: RadarData): string {
   lines.push(`| leave-one-out | ${v.n} | x${v.loo_error_multiple} | x${v.flat_loo_multiple} | x${v.loo_improvement} lower miss | ${v.loo_spearman} |`);
   lines.push(`| walk-forward (oldest half trains, newer half tests) | ${v.n - Math.floor(v.n / 2)} | x${v.walk_forward_multiple} | — | x${v.walk_forward_improvement} lower miss | — |`);
   lines.push('');
-  lines.push(`A median miss of x${v.loo_error_multiple} is what a comps model of this kind can honestly claim: launch value is a centered estimate for a protocol of this size, growth and sector, not a forecast of any one token.`);
+  lines.push(`The miss is the median |ln(predicted / actual)| as a factor. The interval each row carries is the leave-one-out residual band: P10 ${v.q10 >= 0 ? '+' : ''}${v.q10}, P25 ${v.q25 >= 0 ? '+' : ''}${v.q25}, P75 ${v.q75 >= 0 ? '+' : ''}${v.q75}, P90 ${v.q90 >= 0 ? '+' : ''}${v.q90} in log points, so the P25–P75 band is roughly x${Math.exp(v.q25).toFixed(2)} to x${Math.exp(v.q75).toFixed(2)} of the fitted value. Honesty check on the walk-forward folds, which the quantiles never saw: the actual fell inside P10–P90 ${pct(v.coverage_p10_p90)} of the time (nominal 80%) and inside P25–P75 ${pct(v.coverage_p25_p75)} (nominal 50%).`);
   lines.push('');
   lines.push('## 2. The launch odds — the peers\' own record');
   lines.push('');
@@ -60,48 +61,47 @@ export function methodMarkdown(radar: RadarData): string {
   lines.push('');
   lines.push('```');
   lines.push(`logit P(token today) = ${f4(o.intercept)} + ${f4(o.size_weight)} * log10(TVL $M) + ${f4(o.age_weight)} * ln(1 + age years) + (${f4(o.growth_weight)}) * growth`);
-  lines.push(`odds_12m = [P(age + 1) - P(age)] / [1 - P(age)], clamped to 2%..60%`);
+  lines.push(`odds = [P(oldest ${o.oldest_years}y) - P(age)] / [1 - P(age)], clamped to 2%..95%`);
   lines.push('```');
   lines.push('');
-  lines.push(`Ranking quality: AUC ${o.auc} on the peers themselves (0.5 is a coin toss). Calibration by age band, the fit's mean share beside the peers' observed share:`);
+  lines.push(`The horizon is the oldest dated peer in the snapshot (${o.oldest_years} years), not an arbitrary year: a five-year-old protocol is measured over its remaining plausible life. Ranking quality: AUC ${o.auc.toFixed(2)} on the peers themselves (0.5 is a coin toss). Brier score ${o.brier.toFixed(4)} against ${o.brier_base.toFixed(4)} for the base rate alone (${pct(o.n_tokens / o.n_peers)} of peers carry a token): the fit has to beat that number to be worth carrying. Calibration by age band, the fit's mean share beside the peers' observed share:`);
   lines.push('');
   lines.push('| age band | peers | fitted share | observed share |');
   lines.push('|---|---|---|---|');
   for (const band of o.calibration) lines.push(`| ${band.band} | ${band.n} | ${pct(band.predicted)} | ${pct(band.observed)} |`);
   lines.push('');
-  lines.push('## 3. The board');
+  lines.push('## 3. The board and the accounting ledger');
   lines.push('');
   lines.push('```');
-  lines.push('implied value = launch value (comps curve) * twelve-month launch odds');
+  lines.push('implied value = launch value (comps curve) * eventual launch odds');
   lines.push('```');
   lines.push('');
-  lines.push(`The board carries every plausible pre-token candidate, ranked by implied value, and every watchlist slug is on it (${cov.watchlist_covered}/${cov.watchlist}). Coverage of the snapshot:`);
+  lines.push(`The board carries every plausible pre-token candidate, ranked by implied value, and every watchlist slug is on it (${cov.watchlist_covered}/${cov.watchlist}). The whole snapshot, accounted for in exactly one group per protocol:`);
   lines.push('');
-  lines.push('```');
-  lines.push(`${cov.protocols} protocols in the snapshot`);
-  lines.push(`- ${cov.trading} already record a token (${cov.trading_with_mcap} with a market cap: the comps; ${cov.trading_without_mcap} ticker-only: set aside)`);
-  lines.push(`= ${cov.pre_token} without a token`);
-  lines.push(`- ${cov.tokenless_by_design} tokenless by design (exchanges, wrapped/staked/bridged products, versioned pools)`);
-  lines.push(`= ${cov.scored} plausible launch candidates, all ${cov.scored} scored`);
-  lines.push('```');
+  lines.push('| group | protocols |');
+  lines.push('|---|---|');
+  for (const group of acc.groups) lines.push(`| ${group.label} | ${group.n} |`);
+  lines.push(`| **total** | **${acc.total}** |`);
+  lines.push('');
+  lines.push(`The groups sum to ${acc.total} against ${cov.protocols} in the snapshot: ${acc.matches ? 'equal, nothing unaccounted' : 'NOT equal'}. Board digest (FNV-1a over rank|slug|implied on all ${cov.scored} rows): ${acc.digest}; the page re-derives it from data.js and reports agreement.`);
   lines.push('');
   lines.push('## 4. The farm verdict — dollars per hour, not a promise');
   lines.push('');
   lines.push(`For each row: expected airdrop = implied value x ${e.wallet_share} (one wallet is assumed to capture 0.001% of FDV); cost = gas ($${e.gas_base_usd} up front + $${e.gas_weekly_usd}/week) + the capital's ${(e.opportunity_rate * 100).toFixed(0)}%/year opportunity cost; hours = ${e.setup_hours} to set up + ${e.weekly_hours}/week. Hold: 8 weeks under a year old, 6 under two, 5 under three, else 4 (6 when unlisted). Verdict: farm only when net >= $${e.farm_net_usd} and >= $${e.farm_per_hour_usd}/hour; thin when net >= $${e.thin_net_usd} and >= $${e.thin_per_hour_usd}/hour; otherwise skip.`);
   lines.push('');
-  lines.push(`Result across the ${cov.scored} candidates: ${cov.verdicts.farm} farm, ${cov.verdicts.thin} thin, ${cov.verdicts.skip} skip. Each detail view carries the six costed, timed steps.`);
+  lines.push(`Result across the ${cov.scored} candidates: ${cov.verdicts.farm} farm, ${cov.verdicts.thin} thin, ${cov.verdicts.skip} skip. Every detail view carries seven costed, timed steps, the last one the exit rule written before the position opens.`);
   lines.push('');
   lines.push('## 5. Top of the board');
   lines.push('');
-  lines.push('| # | protocol | sector | TVL | launch value | odds | implied | net rate | verdict |');
-  lines.push('|---|---|---|---|---|---|---|---|---|');
+  lines.push('| # | protocol | sector | TVL | launch value | odds | implied | P25–P75 | net rate | verdict |');
+  lines.push('|---|---|---|---|---|---|---|---|---|---|');
   for (const row of radar.rows.slice(0, 20)) lines.push(rowLine(row));
   lines.push('');
   lines.push(`Board median implied ${millions(radar.stats.median_implied)}, median odds ${pct(radar.stats.median_odds)}, top implied ${millions(radar.stats.top_implied)}.`);
   lines.push('');
   lines.push('## 6. Reproducibility');
   lines.push('');
-  lines.push('The program reads the snapshot, fits both models with plain arithmetic (Gaussian elimination, Huber IRLS, logistic IRLS), writes board.json and data.js, and copies this page. The page loads data.js and re-runs every row\'s launch value, odds, implied value and verdict from the fitted coefficients printed here; the badge above the board reports the row count that agrees with board.json. No row is hand-placed, no name is special-cased, and the dashboard names no network address.');
+  lines.push('The program reads the snapshot, fits both models with plain arithmetic (Gaussian elimination, Huber IRLS, logistic IRLS), writes board.json and data.js, and copies this page. The page loads data.js and re-runs every row\'s launch value, odds, implied value, P25–P75 interval and verdict from the fitted coefficients printed here; the badge above the board reports the row count that agrees with board.json and the digest that agrees with the ledger. No row is hand-placed, no name is special-cased, and the dashboard names no network address.');
   lines.push('');
   return `${lines.join('\n')}\n`;
 }

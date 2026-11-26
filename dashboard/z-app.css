@@ -66,6 +66,9 @@ button { cursor: pointer; }
 .seg button:hover { color: var(--ink); background: rgba(148, 163, 184, 0.07); }
 .seg button.on { background: var(--panel-3); color: var(--ink); box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04); }
 .count { margin-left: auto; font-size: 11.5px; color: var(--dim); padding-bottom: 9px; font-variant-numeric: tabular-nums; }
+.evidence { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; padding: 9px 13px; border: 1px solid var(--line); border-radius: 9px; background: rgba(10, 14, 21, 0.6); font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.evidence .ev-label { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); }
+.evidence b { color: var(--ink); font-weight: 600; }
 .table-wrap { margin-top: 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); overflow: auto; max-height: calc(100vh - 330px); }
 .board { width: 100%; border-collapse: separate; border-spacing: 0; }
 .board thead th { position: sticky; top: 0; z-index: 2; padding: 9px 12px; background: #0c1119; border-bottom: 1px solid var(--line-strong); font-size: 9.5px; font-weight: 600; letter-spacing: 0.13em; text-transform: uppercase; color: var(--dim); text-align: left; white-space: nowrap; user-select: none; }
@@ -84,6 +87,7 @@ tr.top3 td.rank { color: var(--orange); font-weight: 650; }
 td.name .nm { display: flex; align-items: center; gap: 7px; font-weight: 550; color: var(--ink); }
 td.name .meta { font-size: 10.5px; color: var(--dim); margin-top: 1px; max-width: 230px; overflow: hidden; text-overflow: ellipsis; }
 .chip-watch { font-size: 8.5px; letter-spacing: 0.1em; padding: 1.5px 5px; border-radius: 4px; border: 1px solid rgba(255, 122, 51, 0.35); color: var(--orange); text-transform: uppercase; flex: none; }
+.chip-off { font-size: 8.5px; letter-spacing: 0.1em; padding: 1.5px 5px; border-radius: 4px; border: 1px solid rgba(106, 169, 255, 0.32); color: var(--blue); text-transform: uppercase; flex: none; }
 .sector { color: var(--muted); font-size: 12px; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.tv { color: #c8d0dd; }
@@ -92,6 +96,10 @@ td.change.down { color: var(--red); }
 td.age { color: var(--muted); }
 td.odds { color: #cfd6e2; }
 td.implied { color: var(--orange); font-weight: 600; }
+td.range { color: var(--muted); font-size: 11.5px; }
+td.net { color: var(--muted); }
+td.net.pos { color: #9fe8c6; }
+td.net.neg { color: var(--dim); }
 td.perhour { color: var(--muted); }
 td.perhour.pos { color: var(--green); }
 td.perhour.neg { color: var(--dim); }
@@ -119,6 +127,7 @@ td.perhour.neg { color: var(--dim); }
 .d-value span { display: block; font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; color: #ffb98c; }
 .d-value strong { display: block; font-size: 32px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
 .d-value p { font-size: 11.5px; color: #e6b696; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.d-value p.d-range { color: #ffd9bd; border-top: 1px dashed rgba(255, 122, 51, 0.25); padding-top: 5px; margin-top: 7px; }
 .d-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
 .d-cell { padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
 .d-cell span { display: block; font-size: 9px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--dim); }
@@ -158,6 +167,8 @@ td.perhour.neg { color: var(--dim); }
 .m-table th { color: var(--dim); font-weight: 500; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; }
 .m-table td.num, .m-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .m-table td.good { color: var(--green); }
+.m-table tr.total td { border-top: 1px solid var(--line-strong); color: var(--ink); font-weight: 550; }
+.m-table.ledger { margin-top: 13px; }
 .bars { margin-top: 11px; display: flex; flex-direction: column; gap: 7px; }
 .bar-row { display: grid; grid-template-columns: 130px 1fr 44px; gap: 9px; align-items: center; font-size: 10.5px; color: var(--muted); }
 .bar-track { height: 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.09); overflow: hidden; position: relative; }

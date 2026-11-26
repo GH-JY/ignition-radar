@@ -1,7 +1,8 @@
 /* Ignition — the page re-runs the model on every row it shows.
-The board it was handed (../data.js) carries the fitted coefficients, the plan's economics
-and 198 rows. Nothing here is fetched: the page recomputes launch value, odds, implied value
-and verdict from those coefficients, then reports how many rows agree with board.json. */
+The board it was handed (../data.js) carries the fitted coefficients, the residual quantiles,
+the plan's economics and the ranked rows. Nothing here is fetched: the page recomputes launch
+value, eventual odds, implied value, its P25–P75 band and the verdict from those coefficients,
+re-derives the board digest, and reports how many rows agree with board.json. */
 (function () {
 'use strict';
 
@@ -56,8 +57,8 @@ function oddsOf(row) {
 var growth = growthOf(row.change_7d);
 var age = ageYearsOf(row);
 var now = shareOf(row.tvl_usd, age, growth);
-var later = shareOf(row.tvl_usd, age + 1, growth);
-return clamp((later - now) / Math.max(1e-9, 1 - now), 0.02, 0.6);
+var end = shareOf(row.tvl_usd, Math.max(age, O.oldest_years), growth);
+return clamp((end - now) / Math.max(1e-9, 1 - now), 0.02, 0.95);
 }
 function weeksOf(age) {
 if (age == null) return E.hold_unknown_weeks;
@@ -80,24 +81,43 @@ var perHour = net / hours;
 var verdict = net >= E.farm_net_usd && perHour >= E.farm_per_hour_usd ? 'farm' : net >= E.thin_net_usd && perHour >= E.thin_per_hour_usd ? 'thin' : 'skip';
 return { weeks: weeks, hours: hours, capital: capital, gas: gas, opportunity: opportunity, expected: expected, net: net, perHour: perHour, verdict: verdict };
 }
+function intervalOf(launch, odds, implied) {
+var low = Math.max(1, Math.min(implied, Math.round(launch * Math.exp(V.q25) * odds)));
+var high = Math.max(low, Math.max(implied, Math.round(launch * Math.exp(V.q75) * odds)));
+return { low: low, high: high };
+}
 function recompute(row) {
 var launch = launchOf(row);
 var odds = oddsOf(row);
 var implied = Math.max(1, Math.round(launch * odds));
-return { launch: launch, odds: odds, implied: implied, econ: econOf(row, implied) };
+return { launch: launch, odds: odds, implied: implied, range: intervalOf(launch, odds, implied), econ: econOf(row, implied) };
 }
 
 var audits = D.rows.map(function (row) {
 var m = recompute(row);
 var ok = Math.round(m.launch) === row.launch_value_usd &&
-Math.round(m.odds * 1e4) / 1e4 === row.odds_12m &&
+Math.round(m.odds * 1e4) / 1e4 === row.odds_eventual &&
 m.implied === row.implied_value_usd &&
+m.range.low === row.implied_low_usd &&
+m.range.high === row.implied_high_usd &&
 m.econ.verdict === row.verdict;
 return { row: row, m: m, ok: ok };
 });
 var auditBySlug = {};
 audits.forEach(function (a) { auditBySlug[a.row.slug] = a; });
 var agreed = audits.filter(function (a) { return a.ok; }).length;
+
+/* The ledger's digest, re-derived here from the rows: FNV-1a over rank|slug|implied. */
+function digestOf(rows) {
+var hash = 0x811c9dc5;
+var text = rows.map(function (row) { return row.rank + '|' + row.slug + '|' + row.implied_value_usd; }).join('\n');
+for (var i = 0; i < text.length; i += 1) {
+hash ^= text.charCodeAt(i);
+hash = Math.imul(hash, 0x01000193) >>> 0;
+}
+return '0x' + (hash >>> 0).toString(16).padStart(8, '0');
+}
+var digestOk = digestOf(D.rows) === D.accounting.digest;
 
 var boardSorted = D.rows.every(function (row, i) { return i === 0 || D.rows[i - 1].implied_value_usd >= row.implied_value_usd; });
 var stepsOk = D.rows.every(function (row) {
@@ -116,14 +136,14 @@ $('#nBoard').textContent = D.rows.length;
 $('#nLive').textContent = D.live.length;
 
 var badge = $('#checkBadge');
-var allOk = agreed === D.rows.length;
+var allOk = agreed === D.rows.length && digestOk && D.accounting.matches;
 badge.className = 'check ' + (allOk ? 'ok' : 'bad');
-badge.innerHTML = '<span class="dot"></span><p><b>' + agreed + ' / ' + D.rows.length + ' rows recompute</b> and agree with the board: launch value, odds, implied value and verdict.</p>';
+badge.innerHTML = '<span class="dot"></span><p><b>' + agreed + ' / ' + D.rows.length + ' rows recompute</b> and agree with the board: launch value, eventual odds, implied value, P25–P75 and verdict. Board digest <b>' + D.accounting.digest + '</b> ' + (digestOk ? 're-derives from these rows' : 'does NOT re-derive') + '; the ledger sums to <b>' + D.accounting.total + '</b> (' + (D.accounting.matches ? 'equal to the snapshot' : 'NOT equal') + ').</p>';
 
 function stat(label, value) {
 return '<div class="head-stat"><span>' + label + '</span><strong>' + value + '</strong></div>';
 }
-$('#headStats').innerHTML = stat('Median odds', pct(D.stats.median_odds)) + stat('Median implied', money(D.stats.median_implied)) + stat('Top implied', money(D.stats.top_implied));
+$('#headStats').innerHTML = stat('Median eventual odds', pct(D.stats.median_odds)) + stat('Median implied', money(D.stats.median_implied)) + stat('Top implied', money(D.stats.top_implied));
 
 function kpi(label, value, note, tone) {
 return '<div class="kpi ' + (tone || '') + '"><span>' + label + '</span><strong>' + value + '</strong><p>' + note + '</p></div>';
@@ -132,15 +152,26 @@ $('#kpis').innerHTML =
 kpi('Snapshot protocols', COV.protocols, COV.trading + ' trading · ' + COV.pre_token + ' pre-token') +
 kpi('Launch candidates', COV.scored, COV.tokenless_by_design + ' tokenless by design', 'hot') +
 kpi('Watchlist covered', COV.watchlist_covered + '/' + COV.watchlist, 'every listed slug scored', 'good') +
-kpi('Odds model AUC', O.auc.toFixed(2), O.n_peers + ' peers · ' + O.n_tokens + ' tokens') +
-kpi('Comps held-out miss', '×' + V.loo_error_multiple, 'flat ×' + V.flat_loo_multiple + ' · rank ' + V.loo_spearman) +
+kpi('Odds model AUC', O.auc.toFixed(2), O.n_peers + ' peers · Brier ' + O.brier.toFixed(3) + ' vs ' + O.brier_base.toFixed(3) + ' base') +
+kpi('Comps held-out miss', '×' + V.loo_error_multiple, 'flat ×' + V.flat_loo_multiple + ' · walk ×' + V.walk_forward_multiple + ' · rank ' + V.loo_spearman) +
 kpi('Farmable rows', COV.verdicts.farm, COV.verdicts.thin + ' thin · ' + COV.verdicts.skip + ' skip', 'good');
+
+/* The evidence strip: the out-of-sample numbers the board's ordering rests on. */
+$('#evidence').innerHTML =
+'<span class="ev-label">Out-of-sample evidence</span>' +
+'<span>comps LOO <b>×' + V.loo_error_multiple + '</b> vs flat ×' + V.flat_loo_multiple + '</span>' +
+'<span>walk-forward <b>×' + V.walk_forward_multiple + '</b></span>' +
+'<span>rank <b>' + V.loo_spearman + '</b></span>' +
+'<span>odds AUC <b>' + O.auc.toFixed(2) + '</b></span>' +
+'<span>Brier <b>' + O.brier.toFixed(3) + '</b> vs ' + O.brier_base.toFixed(3) + '</span>' +
+'<span>P10–P90 coverage <b>' + pct(V.coverage_p10_p90) + '</b> / 80%</span>' +
+'<span>P25–P75 <b>' + pct(V.coverage_p25_p75) + '</b> / 50%</span>';
 
 var VIEWS = {
 board: {
 eyebrow: 'Launch board',
 title: 'Pre-token protocols, ranked by expected launch value',
-sub: 'Implied value = the comps curve\'s launch value × the peers\' twelve-month launch odds. Open a row for its arithmetic and a six-step, costed farm plan.'
+sub: 'Implied value = the comps curve\'s launch value × the peers\' eventual launch odds; the P25–P75 band is the curve\'s held-out residual interval. Open a row for its arithmetic and a seven-step, costed farm plan.'
 },
 live: {
 eyebrow: 'Market record',
@@ -149,8 +180,8 @@ sub: 'The comps curve is fitted on every token that records a market cap; these 
 },
 method: {
 eyebrow: 'Method',
-title: 'The fitted model, its held-out tests and its coverage',
-sub: 'Both models are estimated inside the program from the sealed snapshot: a comps curve for launch value, a logistic record of who launches, and a per-row arithmetic for the farm verdict.'
+title: 'The fitted model, its held-out tests and the ledger',
+sub: 'Both models are estimated inside the program from the sealed snapshot: a comps curve for launch value with a measured interval, a logistic record of who launches, and a per-row arithmetic for the farm verdict. Every snapshot protocol is accounted for, and the board carries a digest the page re-derives.'
 }
 };
 
@@ -179,8 +210,10 @@ category: function (r) { return (r.category || '').toLowerCase(); },
 tvl: function (r) { return r.tvl_usd; },
 change: function (r) { return r.change_7d == null ? -Infinity : r.change_7d; },
 age: function (r) { return r.age_days == null ? -1 : r.age_days; },
-odds: function (r) { return r.odds_12m; },
+odds: function (r) { return r.odds_eventual; },
 implied: function (r) { return r.implied_value_usd; },
+low: function (r) { return r.implied_low_usd; },
+net: function (r) { return r.net_usd; },
 perHour: function (r) { return r.per_hour_usd; },
 verdict: function (r) { return VERDICT_ORDER[r.verdict]; }
 };
@@ -189,7 +222,9 @@ function filteredRows() {
 var q = state.search.trim().toLowerCase();
 return D.rows.filter(function (row) {
 if (state.scope === 'watch' && !row.on_watchlist) return false;
-if (state.scope !== 'all' && state.scope !== 'watch' && row.verdict !== state.scope) return false;
+if (state.scope === 'offlist' && row.on_watchlist) return false;
+if (state.scope === 'early' && !(row.age_days != null && row.age_days < 365)) return false;
+if (state.scope !== 'all' && state.scope !== 'watch' && state.scope !== 'offlist' && state.scope !== 'early' && row.verdict !== state.scope) return false;
 if (state.category !== 'all' && row.category !== state.category) return false;
 if (q) {
 var hay = (row.name + ' ' + row.slug + ' ' + (row.category || '') + ' ' + row.chains.join(' ') + ' ' + (row.listed_at || '')).toLowerCase();
@@ -211,15 +246,18 @@ return out * dir;
 
 function rowHtml(row) {
 var changeClass = row.change_7d == null ? '' : row.change_7d >= 0 ? 'up' : 'down';
+var tag = row.on_watchlist ? '<span class="chip-watch">watch</span>' : row.rank <= 25 ? '<span class="chip-off">off-list</span>' : '';
 return '<tr data-slug="' + esc(row.slug) + '"' + (row.rank <= 3 ? ' class="top3"' : '') + '>' +
 '<td class="rank">' + row.rank + '</td>' +
-'<td class="name"><div class="nm">' + esc(row.name) + (row.on_watchlist ? '<span class="chip-watch">watch</span>' : '') + '</div><div class="meta">' + esc(row.chains.length ? row.chains.join(' · ') : row.slug) + '</div></td>' +
+'<td class="name"><div class="nm">' + esc(row.name) + tag + '</div><div class="meta">' + esc(row.chains.length ? row.chains.join(' · ') : row.slug) + '</div></td>' +
 '<td class="sector">' + esc(row.category || '—') + '</td>' +
 '<td class="num tv">' + money(row.tvl_usd) + '</td>' +
 '<td class="num change ' + changeClass + '">' + (row.change_7d == null ? '—' : signedPct(row.change_7d)) + '</td>' +
 '<td class="num age">' + ageLabel(row.age_days) + '</td>' +
-'<td class="num odds">' + pct(row.odds_12m) + '</td>' +
+'<td class="num odds">' + pct(row.odds_eventual) + '</td>' +
 '<td class="num implied">' + money(row.implied_value_usd) + '</td>' +
+'<td class="num range">' + money(row.implied_low_usd) + '–' + money(row.implied_high_usd) + '</td>' +
+'<td class="num net ' + (row.net_usd >= 0 ? 'pos' : 'neg') + '">' + rate(row.net_usd) + '</td>' +
 '<td class="num perhour ' + (row.per_hour_usd >= 0 ? 'pos' : 'neg') + '">' + rate(row.per_hour_usd) + '</td>' +
 '<td><span class="vchip ' + row.verdict + '">' + row.verdict + '</span></td>' +
 '</tr>';
@@ -254,11 +292,12 @@ var logTvl = Math.log(Math.max(1, row.tvl_usd));
 var logValue = C.intercept + C.tvl_elasticity * logTvl + C.growth_weight * growth + effect;
 var age = ageYearsOf(row);
 var now = shareOf(row.tvl_usd, age, growth);
-var later = shareOf(row.tvl_usd, age + 1, growth);
+var oldest = Math.max(age, O.oldest_years);
+var end = shareOf(row.tvl_usd, oldest, growth);
 var e = m.econ;
 var chips = '<span class="d-chip">Rank #' + row.rank + '</span>' +
 '<span class="d-chip">' + esc(row.category || 'Unclassified') + '</span>' +
-(row.on_watchlist ? '<span class="d-chip watch">watchlist</span>' : '') +
+(row.on_watchlist ? '<span class="d-chip watch">watchlist</span>' : '<span class="d-chip">off-list</span>') +
 '<span class="d-chip">' + esc(row.chains.length ? row.chains.slice(0, 3).join(' · ') : 'chain unknown') + '</span>';
 
 var html = '<div class="d-head"><div>' +
@@ -268,13 +307,14 @@ var html = '<div class="d-head"><div>' +
 '</div><button type="button" class="d-close" id="drawerClose" aria-label="Close">×</button></div>' +
 
 '<div class="d-value"><span>Implied launch value</span><strong>' + money(row.implied_value_usd) + '</strong>' +
-'<p>' + money(m.launch) + ' launch value × ' + pct(m.odds) + ' twelve-month odds</p></div>' +
+'<p>' + money(m.launch) + ' launch value × ' + pct(m.odds) + ' eventual odds</p>' +
+'<p class="d-range">P25–P75 ' + money(m.range.low) + ' – ' + money(m.range.high) + ' · the curve\'s held-out residual interval</p></div>' +
 
 '<div class="d-grid">' +
 '<div class="d-cell"><span>TVL</span><strong>' + full(row.tvl_usd) + '</strong></div>' +
 '<div class="d-cell"><span>7-day change</span><strong>' + (row.change_7d == null ? '—' : signedPct(row.change_7d)) + '</strong></div>' +
 '<div class="d-cell"><span>Age</span><strong>' + ageLabel(row.age_days) + '</strong></div>' +
-'<div class="d-cell"><span>Odds, 12 months</span><strong>' + pct(m.odds) + '</strong></div>' +
+'<div class="d-cell"><span>Odds, eventual</span><strong>' + pct(m.odds) + '</strong></div>' +
 '</div>' +
 
 '<div class="d-card"><h3>Farm plan <span class="vchip ' + e.verdict + '" style="float:right">' + e.verdict + '</span></h3>' +
@@ -288,7 +328,7 @@ var html = '<div class="d-head"><div>' +
 '</div>' +
 '<p class="d-note">Verdict: farm at net ≥ ' + full(E.farm_net_usd) + ' and ≥ $' + E.farm_per_hour_usd + '/h; thin at net ≥ ' + full(E.thin_net_usd) + ' and ≥ $' + E.thin_per_hour_usd + '/h; otherwise skip. Assumes one wallet captures ' + (E.wallet_share * 100).toFixed(5).replace(/0+$/, '') + '% of FDV.</p></div>' +
 
-'<div class="d-card"><h3>Six steps <b>each with a cost and a time</b></h3><ol class="steps">' +
+'<div class="d-card"><h3>Seven steps <b>each with a cost and a time</b></h3><ol class="steps">' +
 row.farm_steps.map(function (step) { return '<li><p>' + stepHtml(step) + '</p></li>'; }).join('') +
 '</ol></div>' +
 
@@ -300,19 +340,22 @@ row.farm_steps.map(function (step) { return '<li><p>' + stepHtml(step) + '</p></
 '<div class="d-row"><span>ln TVL</span><b>' + logTvl.toFixed(3) + '</b></div>' +
 '<div class="d-row"><span>Seven-day growth term, clipped</span><b>' + growth.toFixed(2) + '</b></div>' +
 '<div class="d-row"><span>Sector effect, log points</span><b>' + num3(effect) + '</b></div>' +
+'<div class="d-row"><span>P25–P75 band, ×' + Math.exp(V.q25).toFixed(2) + ' to ×' + Math.exp(V.q75).toFixed(2) + '</span><b>' + money(m.launch * Math.exp(V.q25)) + ' – ' + money(m.launch * Math.exp(V.q75)) + '</b></div>' +
 '<div class="d-row total"><span>Fitted launch value</span><b>' + money(m.launch) + '</b></div>' +
-'</div></div>' +
+'</div>' +
+'<p class="d-note">The band is the leave-one-out residual interval, checked on the walk-forward folds: ' + pct(V.coverage_p10_p90) + ' of actuals inside P10–P90 (nominal 80%), ' + pct(V.coverage_p25_p75) + ' inside P25–P75 (nominal 50%).</p></div>' +
 
-'<div class="d-card"><h3>Launch odds <b>AUC ' + O.auc.toFixed(2) + '</b></h3>' +
-'<div class="eq">P(token today) = ' + pct(now) + ' · P(token at ' + (age + 1).toFixed(1) + 'y) = ' + pct(later) + '<br>' +
-'odds = (' + pct(later) + ' − ' + pct(now) + ') / (1 − ' + pct(now) + ') = <b>' + pct(m.odds) + '</b></div>' +
+'<div class="d-card"><h3>Launch odds <b>AUC ' + O.auc.toFixed(2) + ' · Brier ' + O.brier.toFixed(3) + '</b></h3>' +
+'<div class="eq">P(token today) = ' + pct(now) + ' · P(token by the oldest peer, ' + oldest.toFixed(1) + 'y) = ' + pct(end) + '<br>' +
+'odds = (' + pct(end) + ' − ' + pct(now) + ') / (1 − ' + pct(now) + ') = <b>' + pct(m.odds) + '</b></div>' +
 '<div class="d-rows">' +
 '<div class="d-row"><span>Peer share at ' + age.toFixed(1) + ' years, fitted</span><b>' + pct(now) + '</b></div>' +
-'<div class="d-row"><span>Peer share one year older, fitted</span><b>' + pct(later) + '</b></div>' +
-'<div class="d-row total"><span>Twelve-month launch odds</span><b>' + pct(m.odds) + '</b></div>' +
-'</div></div>' +
+'<div class="d-row"><span>Peer share at the oldest peer\'s age, fitted</span><b>' + pct(end) + '</b></div>' +
+'<div class="d-row total"><span>Eventual launch odds</span><b>' + pct(m.odds) + '</b></div>' +
+'</div>' +
+'<p class="d-note">The horizon is the oldest dated peer in the snapshot (' + O.oldest_years + ' years), not an arbitrary year. AUC on the ' + O.n_peers + ' peers; Brier ' + O.brier.toFixed(3) + ' against ' + O.brier_base.toFixed(3) + ' for the base rate alone.</p></div>' +
 
-'<p class="d-note">This drawer recomputes the row from the fitted coefficients: launch value ' + money(m.launch) + ', odds ' + pct(m.odds) + ', implied ' + full(m.implied) + '. The board carries ' + full(row.implied_value_usd) + '; ' + (auditBySlug[row.slug].ok ? 'the two agree.' : 'they differ.') + '</p>';
+'<p class="d-note">This drawer recomputes the row from the fitted coefficients: launch value ' + money(m.launch) + ', odds ' + pct(m.odds) + ', implied ' + full(m.implied) + ' inside ' + full(m.range.low) + '–' + full(m.range.high) + '. The board carries ' + full(row.implied_value_usd) + ' with ' + full(row.implied_low_usd) + '–' + full(row.implied_high_usd) + '; ' + (auditBySlug[row.slug].ok ? 'the two agree.' : 'they differ.') + '</p>';
 
 $('#drawerBody').innerHTML = html;
 $('#drawer').classList.add('open');
@@ -423,6 +466,18 @@ return '<div class="funnel-step"><span>' + item[0] + '</span><span class="track"
 '<p class="lead" style="margin-top:10px">The ' + COV.tokenless_by_design + ' tokenless-by-design protocols are exchanges, wrapped or staked products and versioned pools; the ' + COV.scored + ' candidates are the field a tokenless protocol can plausibly launch from. Every one of the ' + COV.watchlist + ' watchlist slugs is among them.</p>';
 }
 
+function ledgerHtml() {
+var A = D.accounting;
+return '<table class="m-table ledger"><thead><tr><th>Group, exactly one per protocol</th><th class="num">Protocols</th></tr></thead><tbody>' +
+A.groups.map(function (group) {
+return '<tr><td>' + esc(group.label) + '</td><td class="num">' + group.n + '</td></tr>';
+}).join('') +
+'<tr class="total"><td>Total accounted for</td><td class="num">' + A.total + '</td></tr>' +
+'<tr class="total"><td>Snapshot protocols</td><td class="num">' + COV.protocols + '</td></tr>' +
+'</tbody></table>' +
+'<p class="lead" style="margin-top:8px">The groups sum to <b>' + A.total + '</b> against <b>' + COV.protocols + '</b> in the snapshot: ' + (A.matches ? 'equal, nothing unaccounted.' : 'NOT equal.') + ' Board digest <b>' + A.digest + '</b> (FNV-1a over rank|slug|implied on all ' + D.rows.length + ' rows): the page re-derives it from data.js and reports ' + (digestOk ? 'agreement.' : 'disagreement.') + '</p>';
+}
+
 function economicsHtml() {
 var tiers = E.capital_tiers.map(function (t) {
 return '<tr><td class="num">' + (t.tvl_min_usd === 0 ? 'under $100M' : '≥ ' + money(t.tvl_min_usd)) + '</td><td class="num">' + full(t.capital_usd) + '</td></tr>';
@@ -434,11 +489,12 @@ return '<table class="m-table"><thead><tr><th>TVL tier</th><th class="num">Posit
 function methodHtml() {
 var forwardN = V.n - Math.floor(V.n / 2);
 return '<div class="m-hero"><h3>One snapshot in, a ranked field of launches out</h3>' +
-'<p>Three pieces, each fitted or computed inside the program: the comps curve turns a protocol\'s TVL, seven-day growth and sector into a launch value; the launch record turns its size and age into twelve-month odds; the farm arithmetic turns the two into a plan verdict. No sector multiple is hand-set and no protocol is special-cased.</p>' +
+'<p>Three pieces, each fitted or computed inside the program: the comps curve turns a protocol\'s TVL, seven-day growth and sector into a launch value and a measured interval; the launch record turns its size and age into eventual odds; the farm arithmetic turns the two into a plan verdict. No sector multiple is hand-set and no protocol is special-cased.</p>' +
 '<div class="m-formula">' +
 '<span class="m-pill">implied = launch value × odds</span>' +
 '<span class="m-pill">comps <b>' + C.n_tokens + '</b> tokens · held-out ×' + V.loo_error_multiple + '</span>' +
 '<span class="m-pill">launch record <b>' + O.n_peers + '</b> peers · AUC ' + O.auc.toFixed(2) + '</span>' +
+'<span class="m-pill">ledger <b>' + D.accounting.total + '</b> protocols · digest ' + D.accounting.digest + '</span>' +
 '<span class="m-pill">board <b>' + COV.scored + '</b> candidates · watchlist ' + COV.watchlist_covered + '/' + COV.watchlist + '</span>' +
 '</div></div>' +
 
@@ -452,34 +508,39 @@ effectsHtml() +
 '<tr><td>Walk forward</td><td class="num">' + forwardN + '</td><td class="num good">×' + V.walk_forward_multiple + '</td><td class="num">×' + V.flat_loo_multiple + '</td><td class="num">—</td></tr>' +
 '</tbody></table>' +
 '<p class="lead" style="margin-top:8px">Every fold re-fits the curve and the flat TVL multiple on its own training rows; the miss is the median |ln(predicted / actual)| shown as a factor.</p>' +
+'<div class="eq">P25–P75 band = fitted value × exp(q25)..exp(q75)<br>q25 ' + V.q25 + ' · q75 ' + V.q75 + ' in log points (LOO residuals)<br>walk-forward coverage: ' + pct(V.coverage_p10_p90) + ' inside P10–P90 (nominal 80%)<br>' + pct(V.coverage_p25_p75) + ' inside P25–P75 (nominal 50%)</div>' +
+'<p class="lead" style="margin-top:8px">The interval is the curve\'s own residual band, and its honesty is measured on folds the quantiles never saw: an interval that claims 80% and delivers 55% would be a decoration, so the page prints both numbers.</p>' +
 scatterSvg() + '</div>' +
 
-'<div class="m-card"><h3>2 · The launch record <em>twelve-month odds</em></h3>' +
-'<p class="lead">Every dated protocol is a peer: does it record a token today, and how old is it? A logistic fit of token presence on size, age and growth, then differenced one year forward among the still-tokenless.</p>' +
-'<div class="eq">logit P = ' + O.intercept.toFixed(4) + ' + ' + O.size_weight.toFixed(4) + ' × log10(TVL $M)<br>+ ' + O.age_weight.toFixed(4) + ' × ln(1 + age) + (' + O.growth_weight.toFixed(4) + ') × growth<br>odds = [P(age+1) − P(age)] / [1 − P(age)], clamped 2%–60%</div>' +
+'<div class="m-card"><h3>2 · The launch record <em>eventual odds</em></h3>' +
+'<p class="lead">Every dated protocol is a peer: does it record a token today, and how old is it? A logistic fit of token presence on size, age and growth, then differenced to the oldest peer\'s age among the still-tokenless.</p>' +
+'<div class="eq">logit P = ' + O.intercept.toFixed(4) + ' + ' + O.size_weight.toFixed(4) + ' × log10(TVL $M)<br>+ ' + O.age_weight.toFixed(4) + ' × ln(1 + age) + (' + O.growth_weight.toFixed(4) + ') × growth<br>odds = [P(oldest ' + O.oldest_years + 'y) − P(age)] / [1 − P(age)], clamped 2%–95%</div>' +
 calibrationHtml() +
-'<table class="m-table"><thead><tr><th>Peers</th><th class="num">With token</th><th class="num">AUC</th></tr></thead><tbody><tr><td>' + O.n_peers + '</td><td class="num">' + O.n_tokens + '</td><td class="num good">' + O.auc.toFixed(2) + '</td></tr></tbody></table>' +
-'<p class="lead" style="margin-top:8px">AUC is rank quality on the peers themselves: 0.5 is a coin toss. Calibration compares the fitted share with the observed share in each age band.</p></div>' +
+'<table class="m-table"><thead><tr><th>Peers</th><th class="num">With token</th><th class="num">AUC</th><th class="num">Brier</th><th class="num">Base rate Brier</th></tr></thead><tbody><tr><td>' + O.n_peers + '</td><td class="num">' + O.n_tokens + '</td><td class="num good">' + O.auc.toFixed(2) + '</td><td class="num good">' + O.brier.toFixed(3) + '</td><td class="num">' + O.brier_base.toFixed(3) + '</td></tr></tbody></table>' +
+'<p class="lead" style="margin-top:8px">AUC is rank quality on the peers themselves: 0.5 is a coin toss. Brier must beat the base-rate column, or the fit is not earning its keep. Calibration compares the fitted share with the observed share in each age band; the horizon is the oldest dated peer (' + O.oldest_years + ' years), so a five-year-old protocol is measured over its remaining plausible life.</p></div>' +
 
-'<div class="m-card"><h3>3 · Coverage <em>758 protocols accounted for</em></h3>' + funnelHtml() + '</div>' +
+'<div class="m-card"><h3>3 · Coverage <em>every protocol accounted for</em></h3>' + funnelHtml() + ledgerHtml() + '</div>' +
 
 '<div class="m-card"><h3>4 · The farm arithmetic <em>dollars per hour</em></h3>' +
 '<p class="lead">Expected airdrop = implied value × ' + (E.wallet_share * 100).toFixed(3) + '% for one wallet. Cost = gas + the capital\'s opportunity cost. Time = setup + weekly checks. The verdict is arithmetic under stated assumptions, not a promise.</p>' +
 economicsHtml() + '</div>' +
 
 '<div class="m-card wide"><h3>5 · What this page checks <em>board.json</em></h3><div class="checklist">' +
-'<div class="check-item"><span class="ok">✓</span><span><b>' + agreed + ' / ' + D.rows.length + ' rows</b> recompute in this page and agree with the board on launch value, odds, implied value and verdict.</span></div>' +
+'<div class="check-item"><span class="ok">✓</span><span><b>' + agreed + ' / ' + D.rows.length + ' rows</b> recompute in this page and agree with the board on launch value, eventual odds, implied value, P25–P75 and verdict.</span></div>' +
 '<div class="check-item"><span class="ok">' + (boardSorted ? '✓' : '×') + '</span><span><b>Implied values non-increasing</b> down the board: ' + (boardSorted ? 'the rank order is the value order.' : 'the order disagrees with the values.') + '</span></div>' +
 '<div class="check-item"><span class="ok">' + (COV.watchlist_covered === COV.watchlist ? '✓' : '×') + '</span><span><b>Watchlist ' + COV.watchlist_covered + ' / ' + COV.watchlist + '</b>: every listed slug is scored on the board.</span></div>' +
-'<div class="check-item"><span class="ok">' + (stepsOk ? '✓' : '×') + '</span><span><b>Farm plans</b>: every row carries six steps, each with a cost and a time, inside the gate\'s length bounds.</span></div>' +
+'<div class="check-item"><span class="ok">' + (D.accounting.matches ? '✓' : '×') + '</span><span><b>Ledger ' + D.accounting.total + ' / ' + COV.protocols + '</b>: every snapshot protocol is in exactly one accounting group, and the groups sum to the total.</span></div>' +
+'<div class="check-item"><span class="ok">' + (digestOk ? '✓' : '×') + '</span><span><b>Board digest ' + D.accounting.digest + '</b>: re-derived in this page from rank|slug|implied on every row and compared with the ledger\'s copy.</span></div>' +
+'<div class="check-item"><span class="ok">' + (V.coverage_p10_p90 >= 0.7 && V.coverage_p10_p90 <= 0.9 ? '✓' : '×') + '</span><span><b>Interval honesty</b>: the P10–P90 band covers ' + pct(V.coverage_p10_p90) + ' of walk-forward actuals against a nominal 80%.</span></div>' +
+'<div class="check-item"><span class="ok">' + (stepsOk ? '✓' : '×') + '</span><span><b>Farm plans</b>: every row carries seven steps, each with a cost and a time, inside the gate\'s length bounds.</span></div>' +
 '<div class="check-item"><span class="ok">' + (D.rows.length >= 100 && D.rows.length <= 4000 ? '✓' : '×') + '</span><span><b>Board size ' + D.rows.length + '</b>: inside the 100–4,000 row bound.</span></div>' +
 '</div>' +
-'<p class="lead" style="margin-top:12px">Reading the board: implied value is a centered estimate for a protocol of this size, growth and sector, and the odds are the peers\' record, not a forecast. The farm verdict says whether the plan clears its own costs at the stated wallet share; a skip is still a candidate with a plan.</p></div>' +
+'<p class="lead" style="margin-top:12px">Reading the board: implied value is a centered estimate for a protocol of this size, growth and sector, its P25–P75 band is the curve\'s measured spread, and the odds are the peers\' record, not a forecast. The farm verdict says whether the plan clears its own costs at the stated wallet share; a skip is still a candidate with a plan. "Off-list" marks a row the model surfaced beyond the watchlist: the watchlist is the floor, not the ceiling.</p></div>' +
 
 '<div class="m-card wide"><h3>6 · Top of the board <em>the first ten rows</em></h3>' +
-'<table class="m-table"><thead><tr><th>#</th><th>Protocol</th><th>Sector</th><th class="num">TVL</th><th class="num">Launch value</th><th class="num">Odds</th><th class="num">Implied</th><th class="num">$/h</th><th>Verdict</th></tr></thead><tbody>' +
+'<table class="m-table"><thead><tr><th>#</th><th>Protocol</th><th>Sector</th><th class="num">TVL</th><th class="num">Launch value</th><th class="num">Odds</th><th class="num">Implied</th><th class="num">P25–P75</th><th class="num">$/h</th><th>Verdict</th></tr></thead><tbody>' +
 D.rows.slice(0, 10).map(function (row) {
-return '<tr><td class="num">' + row.rank + '</td><td>' + esc(row.name) + '</td><td>' + esc(row.category || '—') + '</td><td class="num">' + money(row.tvl_usd) + '</td><td class="num">' + money(row.launch_value_usd) + '</td><td class="num">' + pct(row.odds_12m) + '</td><td class="num">' + money(row.implied_value_usd) + '</td><td class="num">' + rate(row.per_hour_usd) + '</td><td><span class="vchip ' + row.verdict + '">' + row.verdict + '</span></td></tr>';
+return '<tr><td class="num">' + row.rank + '</td><td>' + esc(row.name) + '</td><td>' + esc(row.category || '—') + '</td><td class="num">' + money(row.tvl_usd) + '</td><td class="num">' + money(row.launch_value_usd) + '</td><td class="num">' + pct(row.odds_eventual) + '</td><td class="num">' + money(row.implied_value_usd) + '</td><td class="num">' + money(row.implied_low_usd) + '–' + money(row.implied_high_usd) + '</td><td class="num">' + rate(row.per_hour_usd) + '</td><td><span class="vchip ' + row.verdict + '">' + row.verdict + '</span></td></tr>';
 }).join('') + '</tbody></table></div>' +
 '</div>';
 }

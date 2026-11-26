@@ -71,6 +71,8 @@ export interface OddsModel {
   size_weight: number;
   age_weight: number;
   growth_weight: number;
+  /** The oldest dated peer, in years: the horizon the eventual odds are measured to. */
+  oldest_years: number;
   n_peers: number;
   n_tokens: number;
 }
@@ -78,8 +80,11 @@ export interface OddsModel {
 /** A row's fitted breakdown: every term the page shows and re-runs. */
 export interface RowModel {
   launch_value_usd: number;
-  odds_12m: number;
+  odds_eventual: number;
   implied_value_usd: number;
+  /** The P25 and P75 of the fitted value, from the comps curve's held-out residuals. */
+  interval_low_usd: number;
+  interval_high_usd: number;
   age_days: number | null;
   age_years: number;
   growth_term: number;
@@ -101,8 +106,10 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  implied_low_usd: number;
+  implied_high_usd: number;
   launch_value_usd: number;
-  odds_12m: number;
+  odds_eventual: number;
   verdict: 'farm' | 'thin' | 'skip';
   expected_airdrop_usd: number;
   farm_hours: number;
@@ -156,6 +163,14 @@ export interface Validation {
   walk_forward_multiple: number;
   walk_forward_improvement: number;
   loo_spearman: number;
+  /** Log-residual quantiles of the leave-one-out folds: the per-row interval's shape. */
+  q10: number;
+  q25: number;
+  q75: number;
+  q90: number;
+  /** Observed coverage of those intervals on the walk-forward folds (nominal 80% and 50%). */
+  coverage_p10_p90: number;
+  coverage_p25_p75: number;
 }
 
 /** The plan's economics, published so the page re-runs the same arithmetic as the board. */
@@ -184,8 +199,21 @@ export interface RadarData {
   floor_usd: number;
   model_version: string;
   comps: CompsModel & { validation: Validation };
-  odds: OddsModel & { auc: number; calibration: { band: string; n: number; predicted: number; observed: number }[] };
+  odds: OddsModel & {
+    auc: number;
+    brier: number;
+    brier_base: number;
+    calibration: { band: string; n: number; predicted: number; observed: number }[];
+  };
   economics: Economics;
+  /** The whole snapshot, accounted for: every protocol lands in exactly one group. */
+  accounting: {
+    groups: { label: string; n: number }[];
+    total: number;
+    matches: boolean;
+    /** FNV-1a over each board row's rank, slug and implied value: the page re-derives it. */
+    digest: string;
+  };
   coverage: {
     protocols: number;
     watchlist: number;
@@ -211,7 +239,7 @@ export class SnapshotError extends Error {
   }
 }
 
-export const MODEL_VERSION = 'ignition-2';
+export const MODEL_VERSION = 'ignition-3';
 
 /** The share of a launched token's FDV one farming wallet is assumed to capture (0.001%). */
 export const WALLET_SHARE = 0.00001;
@@ -450,6 +478,16 @@ function median(values: number[]): number {
   return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
 }
 
+/** A quantile of a numeric array, linear between the two nearest order statistics. */
+function quantile(values: number[], q: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return lo === hi ? sorted[lo]! : sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (pos - lo);
+}
+
 // --------------------------------------------------------------------------- the comps curve
 
 /**
@@ -573,6 +611,18 @@ function validateComps(rows: CompRow[], categories: string[]): Validation {
   const forwardError = median(forwardPred.map((pred, i) => Math.abs(Math.log(pred / forwardActual[i]!))));
   const flatForward = median(forwardFlat.map((pred, i) => Math.abs(Math.log(pred / forwardActual[i]!))));
 
+  // The interval's shape comes from the leave-one-out residuals; its honesty is measured on
+  // the walk-forward folds, which never trained on the nearby peers: the share of those
+  // actuals that land inside the quantile band, beside the nominal 80% and 50%.
+  const residual = looPred.map((pred, i) => Math.log(actual[i]! / pred));
+  const q10 = quantile(residual, 0.1);
+  const q25 = quantile(residual, 0.25);
+  const q75 = quantile(residual, 0.75);
+  const q90 = quantile(residual, 0.9);
+  const inside = (pred: number, obs: number, lo: number, hi: number): boolean => obs >= pred * Math.exp(lo) && obs <= pred * Math.exp(hi);
+  const n90 = forwardPred.filter((pred, i) => inside(pred, forwardActual[i]!, q10, q90)).length / Math.max(1, forwardPred.length);
+  const n50 = forwardPred.filter((pred, i) => inside(pred, forwardActual[i]!, q25, q75)).length / Math.max(1, forwardPred.length);
+
   return {
     n: rows.length,
     loo_error_multiple: Math.round(Math.exp(looError) * 100) / 100,
@@ -581,6 +631,12 @@ function validateComps(rows: CompRow[], categories: string[]): Validation {
     walk_forward_multiple: Math.round(Math.exp(forwardError) * 100) / 100,
     walk_forward_improvement: Math.round(Math.exp(flatForward - forwardError) * 100) / 100,
     loo_spearman: Math.round(spearman(looPred, actual) * 100) / 100,
+    q10: Math.round(q10 * 1000) / 1000,
+    q25: Math.round(q25 * 1000) / 1000,
+    q75: Math.round(q75 * 1000) / 1000,
+    q90: Math.round(q90 * 1000) / 1000,
+    coverage_p10_p90: Math.round(n90 * 100) / 100,
+    coverage_p25_p75: Math.round(n50 * 100) / 100,
   };
 }
 
@@ -644,30 +700,50 @@ function tokenShare(odds: OddsModel, tvl_usd: number, age_years: number, growth:
   return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
 }
 
-/** The fitted twelve-month launch odds: the share gained over one more year, among the still-tokenless. */
+/**
+ * The fitted eventual launch odds: among peers still tokenless at this age, the share that
+ * ever records a token by the oldest cohort's age. It is the same conditional hazard as a
+ * twelve-month odds, with the horizon the snapshot itself provides (the oldest dated peer)
+ * instead of an arbitrary year, so a five-year-old protocol is measured over its remaining
+ * plausible life, not over the next twelve months.
+ */
 export function launchOdds(odds: OddsModel, tvl_usd: number, age_years: number, growth: number): number {
   const now = tokenShare(odds, tvl_usd, age_years, growth);
-  const later = tokenShare(odds, tvl_usd, age_years + 1, growth);
-  const odds12 = (later - now) / Math.max(1e-9, 1 - now);
-  return Math.max(0.02, Math.min(0.6, odds12));
+  const end = tokenShare(odds, tvl_usd, Math.max(age_years, odds.oldest_years), growth);
+  const eventual = (end - now) / Math.max(1e-9, 1 - now);
+  return Math.max(0.02, Math.min(0.95, eventual));
 }
 
 /** Fit the launch-odds model and its own out-of-sample record. */
-function fitLaunchOdds(snapshot: Snapshot): { model: OddsModel; auc: number; calibration: { band: string; n: number; predicted: number; observed: number }[] } {
+function fitLaunchOdds(snapshot: Snapshot): {
+  model: OddsModel;
+  auc: number;
+  brier: number;
+  brier_base: number;
+  calibration: { band: string; n: number; predicted: number; observed: number }[];
+} {
   const rows = oddsRows(snapshot);
   const X = rows.map(oddsDesign);
   const y = rows.map((row) => (row.has_token ? 1 : 0));
   const beta = logisticFit(X, y);
+  const oldestYears = rows.reduce((oldest, row) => Math.max(oldest, row.age_years), 0);
   const model: OddsModel = {
     intercept: beta[0]!,
     size_weight: beta[1]!,
     age_weight: beta[2]!,
     growth_weight: beta[3]!,
+    oldest_years: Math.round(oldestYears * 100) / 100,
     n_peers: rows.length,
     n_tokens: rows.filter((row) => row.has_token).length,
   };
   const predicted = rows.map((row) => tokenShare(model, row.tvl_usd, row.age_years, row.growth));
   const aucValue = Math.round(auc(predicted, rows.map((row) => row.has_token)) * 100) / 100;
+
+  // Brier score against the base rate: a fit that cannot beat "every peer has the same
+  // chance" is not a model, so the page shows both numbers side by side.
+  const base = y.reduce((sum, value) => sum + value, 0) / y.length;
+  const brier = Math.round((predicted.reduce((sum, p, i) => sum + (p - y[i]!) ** 2, 0) / y.length) * 1e4) / 1e4;
+  const brierBase = Math.round((y.reduce((sum, value) => sum + (base - value) ** 2, 0) / y.length) * 1e4) / 1e4;
 
   // Calibration by age band: what the fit says the token share is, beside what the peers show.
   const bands = [0, 1, 2, 3, 5, 100];
@@ -684,7 +760,7 @@ function fitLaunchOdds(snapshot: Snapshot): { model: OddsModel; auc: number; cal
       observed: Math.round(meanObs * 100) / 100,
     });
   }
-  return { model, auc: aucValue, calibration };
+  return { model, auc: aucValue, brier, brier_base: brierBase, calibration };
 }
 
 // --------------------------------------------------------------------------- the farm plans
@@ -800,7 +876,7 @@ export function stepText(action: string, cost: string, time: string): string {
   return text;
 }
 
-/** The protocol's farm plan: six concrete steps with a cost and a time each, from its own record. */
+/** The protocol's farm plan: seven concrete steps with a cost and a time each, from its own record. */
 export function farmPlan(protocol: SnapshotProtocol, age: number | null): string[] {
   const chain = chainOf(protocol);
   const capital = capitalFor(protocol.tvl_usd);
@@ -809,6 +885,7 @@ export function farmPlan(protocol: SnapshotProtocol, age: number | null): string
   const category = protocol.category ?? '';
   const primary = primaryAction(protocol, capital, chain);
   const secondary = secondaryAction(protocol, category);
+  const exitFloor = Math.round(protocol.tvl_usd * 0.75).toLocaleString('en-US');
   return [
     stepText(
       'Create a fresh wallet for this position and keep its seed phrase offline; fund it a little beyond the deposit so gas never blocks an exit.',
@@ -831,6 +908,11 @@ export function farmPlan(protocol: SnapshotProtocol, age: number | null): string
       `Check ${protocol.name}'s own site for a points or rewards page, claim only from the link it publishes, and write the wallet, dates and transactions in a farm log.`,
       'no fee to check, and never pay to claim',
       '15 minutes at the end',
+    ),
+    stepText(
+      `Write the exit before funding: leave if ${protocol.name}'s TVL stays below $${exitFloor} for two full weeks, and stop if a launch's claim page will not verify this wallet within 30 days.`,
+      'no fee; the exit is a rule, not a trade',
+      '10 minutes before you start',
     ),
   ];
 }
@@ -875,21 +957,33 @@ function indexOf(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((protocol) => [protocol.slug, protocol]));
 }
 
+/**
+ * The P25–P75 implied interval: the fitted value's held-out residual band, scaled by the
+ * same odds. The point estimate is always inside its own band, and the low bound never
+ * drops below one dollar, so the page can draw the range on every row without exceptions.
+ */
+export function impliedInterval(value: number, odds: number, implied: number, q25: number, q75: number): { low: number; high: number } {
+  const low = Math.max(1, Math.min(implied, round(value * Math.exp(q25) * odds)));
+  const high = Math.max(low, Math.max(implied, round(value * Math.exp(q75) * odds)));
+  return { low, high };
+}
+
 /** The ranked board: every plausible pre-token candidate, watchlist first by coverage. */
-export function buildBoard(snapshot: Snapshot, comps: CompsModel, odds: OddsModel): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, comps: CompsModel, odds: OddsModel, validation: Validation): BoardRow[] {
   const watch = new Set(snapshot.watchlist);
   const candidates = snapshot.protocols.filter((protocol) => isCandidate(protocol));
   const scored = candidates.map((protocol) => {
     const age = ageDays(snapshot.as_of, protocol.listed_at);
     const ageYears = age === null ? 1 : Math.max(0.05, age / DAYS_PER_YEAR);
     const value = launchValue(protocol.tvl_usd, protocol.change_7d, protocol.category, comps);
-    const odds12 = launchOdds(odds, protocol.tvl_usd, ageYears, growthTerm(protocol.change_7d));
-    const implied = Math.max(1, round(value * odds12));
+    const oddsEventual = launchOdds(odds, protocol.tvl_usd, ageYears, growthTerm(protocol.change_7d));
+    const implied = Math.max(1, round(value * oddsEventual));
+    const interval = impliedInterval(value, oddsEventual, implied, validation.q25, validation.q75);
     const money = farmEconomics(protocol, implied, age);
-    return { protocol, age, ageYears, value, odds12, implied, money };
+    return { protocol, age, ageYears, value, oddsEventual, implied, interval, money };
   });
   scored.sort((a, b) => b.implied - a.implied || b.value - a.value || (a.protocol.slug < b.protocol.slug ? -1 : 1));
-  return scored.map(({ protocol, age, ageYears, value, odds12, implied, money }, index) => ({
+  return scored.map(({ protocol, age, ageYears, value, oddsEventual, implied, interval, money }, index) => ({
     rank: index + 1,
     slug: protocol.slug,
     name: protocol.name,
@@ -902,8 +996,10 @@ export function buildBoard(snapshot: Snapshot, comps: CompsModel, odds: OddsMode
     token_status: 'pre-token',
     age_days: age,
     implied_value_usd: implied,
+    implied_low_usd: interval.low,
+    implied_high_usd: interval.high,
     launch_value_usd: round(value),
-    odds_12m: round4(odds12),
+    odds_eventual: round4(oddsEventual),
     verdict: money.verdict,
     expected_airdrop_usd: money.expected_airdrop_usd,
     farm_hours: money.farm_hours,
@@ -913,8 +1009,10 @@ export function buildBoard(snapshot: Snapshot, comps: CompsModel, odds: OddsMode
     on_watchlist: watch.has(protocol.slug),
     model: {
       launch_value_usd: round(value),
-      odds_12m: round4(odds12),
+      odds_eventual: round4(oddsEventual),
       implied_value_usd: implied,
+      interval_low_usd: interval.low,
+      interval_high_usd: interval.high,
       age_days: age,
       age_years: Math.round(ageYears * 100) / 100,
       growth_term: Math.round(growthTerm(protocol.change_7d) * 1000) / 1000,
@@ -967,11 +1065,22 @@ export function cleanSource(source: string): string {
     .trim();
 }
 
+/** FNV-1a over each row's rank, slug and implied value: a digest the page can re-derive. */
+export function boardDigest(rows: BoardRow[]): string {
+  let hash = 0x811c9dc5;
+  const text = rows.map((row) => `${row.rank}|${row.slug}|${row.implied_value_usd}`).join('\n');
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `0x${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
 /** Everything the dashboard needs: the fitted model, the board, the anchors and the stats. */
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const { model: comps, validation } = fitComps(snapshot);
   const oddsFit = fitLaunchOdds(snapshot);
-  const board = buildBoard(snapshot, comps, oddsFit.model);
+  const board = buildBoard(snapshot, comps, oddsFit.model, validation);
   const live = liveRows(snapshot);
   const trading = snapshot.protocols.filter((protocol) => hasToken(protocol)).length;
   const tradingWithMcap = snapshot.protocols.filter((protocol) => hasToken(protocol) && protocol.mcap_usd !== null).length;
@@ -979,14 +1088,27 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const verdicts = { farm: 0, thin: 0, skip: 0 };
   for (const row of board) verdicts[row.verdict] += 1;
   const watchSet = new Set(snapshot.watchlist);
+  const groups = [
+    { label: 'already trading, with a market cap (comps training rows)', n: tradingWithMcap },
+    { label: 'already trading, ticker only, no market cap (set aside)', n: trading - tradingWithMcap },
+    { label: 'tokenless by design (exchanges, wrapped, staked, bridged, versioned)', n: tokenlessByDesign },
+    { label: 'tokenless and plausible, scored on the board', n: board.length },
+  ];
+  const accounted = groups.reduce((sum, group) => sum + group.n, 0);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: cleanSource(snapshot.source),
     floor_usd: snapshot.floor_usd,
     model_version: MODEL_VERSION,
     comps: { ...comps, validation },
-    odds: { ...oddsFit.model, auc: oddsFit.auc, calibration: oddsFit.calibration },
+    odds: { ...oddsFit.model, auc: oddsFit.auc, brier: oddsFit.brier, brier_base: oddsFit.brier_base, calibration: oddsFit.calibration },
     economics: ECONOMICS,
+    accounting: {
+      groups,
+      total: accounted,
+      matches: accounted === snapshot.protocols.length,
+      digest: boardDigest(board),
+    },
     coverage: {
       protocols: snapshot.protocols.length,
       watchlist: snapshot.watchlist.length,
@@ -1003,7 +1125,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     stats: {
       median_implied: round(median(board.map((row) => row.implied_value_usd))),
       top_implied: board.length > 0 ? board[0]!.implied_value_usd : 0,
-      median_odds: round(median(board.map((row) => row.odds_12m)) * 100) / 100,
+      median_odds: round(median(board.map((row) => row.odds_eventual)) * 100) / 100,
     },
     rows: board,
     live,
