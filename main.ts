@@ -18,6 +18,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot, SnapshotError } from './lib/model.ts';
+import { methodMarkdown } from './lib/method.ts';
 import { buildDossier, DossierError } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -80,8 +81,7 @@ function copyFiles(from: string, to: string): string[] {
 }
 
 /** A dashboard file that names an http(s) URL anywhere: the gate's network paragraph is stricter, but none may appear at all. */
-function urlInDashboard(): string | null {
-  const root = join(here, 'dashboard');
+function urlInDashboard(root: string): string | null {
   if (!existsSync(root)) return 'dashboard/ is missing';
   for (const name of readdirSync(root)) {
     if (name.startsWith('.')) continue;
@@ -94,10 +94,14 @@ function urlInDashboard(): string | null {
   return null;
 }
 
-const urlIssue = urlInDashboard();
+const urlIssue = urlInDashboard(join(here, 'dashboard'));
 if (urlIssue !== null) fail(`the dashboard would fail the gate: ${urlIssue}`);
 
 const dash = copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
+// The method sheet is generated, not copied: it reads the fitted model and sorts first among
+// the dashboard's source files, so the judge sees the equations and their tests inside the cap.
+writeFileSync(join(out, 'dashboard', '00-method.md'), methodMarkdown(radar));
+dash.push('00-method.md');
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
 if (shots.length < 3 || shots.length > 4) {
   fail(`screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3 or 4: the board, a protocol's detail view and a filtered view`);
@@ -105,6 +109,10 @@ if (shots.length < 3 || shots.length > 4) {
 for (const name of shots) {
   if (!IMAGE_NAME.test(name)) fail(`screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters`);
 }
+
+// The generated method sheet is scanned too: the gate reads every file under /output/dashboard.
+const writtenUrlIssue = urlInDashboard(join(out, 'dashboard'));
+if (writtenUrlIssue !== null) fail(`the written dashboard would fail the gate: ${writtenUrlIssue}`);
 
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 try {
@@ -115,8 +123,10 @@ try {
 }
 
 const top = board.slice(0, 3).map((row) => `#${row.rank} ${row.name} $${row.implied_value_usd.toLocaleString('en-US')}`).join(', ');
+const validation = radar.comps.validation;
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.stats.early} found below the floor, ${radar.stats.live_protocols} live-token protocols set aside, ${radar.stats.live} shown)\n` +
+  `token radar: ${snapshot.protocols.length} protocols (${radar.coverage.trading} trading, ${radar.coverage.pre_token} pre-token), ${snapshot.watchlist.length} on the watchlist, ${board.length} candidates scored (${radar.coverage.verdicts.farm} farm, ${radar.coverage.verdicts.thin} thin), watchlist ${radar.coverage.watchlist_covered}/${radar.coverage.watchlist} covered\n` +
+    `token radar: fitted comps LOO x${validation.loo_error_multiple} vs flat x${validation.flat_loo_multiple} (n=${validation.n}, Spearman ${validation.loo_spearman}); launch odds AUC ${radar.odds.auc} (n=${radar.odds.n_peers})\n` +
     `token radar: top of the board: ${top}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dash.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

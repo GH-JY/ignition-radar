@@ -1,167 +1,115 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ignition — the token launch radar</title>
-  <link rel="stylesheet" href="app.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ignition — token launch radar</title>
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <div class="shell">
-    <aside class="rail">
-      <header class="brand">
-        <div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
-        <div>
-          <h1>IGNITION</h1>
-          <p>token launch radar</p>
-        </div>
-      </header>
+<div class="shell">
+<aside class="rail">
+<div class="brand">
+<span class="spark" aria-hidden="true"></span>
+<div>
+<h1>Ignition</h1>
+<p>token launch radar</p>
+</div>
+</div>
 
-      <section class="snapshot" aria-label="Snapshot">
-        <p class="eyebrow">Sealed snapshot</p>
-        <p class="snapshot-date" id="snapshotDate">—</p>
-        <p class="snapshot-note" id="snapshotNote">Loading the board.</p>
-      </section>
+<div class="snap">
+<p class="label">Snapshot</p>
+<strong id="snapDate">—</strong>
+<p id="snapSource" class="muted"></p>
+<p id="snapFloor" class="muted"></p>
+</div>
 
-      <nav class="tabs" id="tabs" aria-label="Views">
-        <button type="button" class="tab is-active" data-tab="board">Ranked board <span class="tab-count" id="tabBoardCount">—</span></button>
-        <button type="button" class="tab" data-tab="live">Token trades <span class="tab-count" id="tabLiveCount">—</span></button>
-        <button type="button" class="tab" data-tab="method">Method <span class="tab-count">≡</span></button>
-      </nav>
+<nav class="tabs" id="tabs" aria-label="Views">
+<button type="button" data-view="board" class="on">Launch board <em id="nBoard"></em></button>
+<button type="button" data-view="live">Traded tokens <em id="nLive"></em></button>
+<button type="button" data-view="method">Method</button>
+</nav>
 
-      <section class="filters" id="filters" aria-label="Filters">
-        <label class="search">
-          <span>Search</span>
-          <input id="search" type="search" placeholder="name or slug" autocomplete="off" spellcheck="false">
-        </label>
-        <label class="select">
-          <span>Category</span>
-          <select id="category"></select>
-        </label>
-        <div class="segmented" role="group" aria-label="Horizon">
-          <button type="button" class="seg is-active" data-horizon="all">All</button>
-          <button type="button" class="seg" data-horizon="watch">Watchlist</button>
-          <button type="button" class="seg" data-horizon="early">Below floor</button>
-        </div>
-        <button type="button" class="reset" id="reset">Clear filters</button>
-      </section>
+<div class="rail-foot">
+<div class="check" id="checkBadge"><span class="dot"></span><p>Checking the board…</p></div>
+<p class="note">Every figure is fitted from the sealed snapshot. The page re-runs the arithmetic on every row and compares it with the board it was handed.</p>
+<p class="note dim" id="modelTag"></p>
+</div>
+</aside>
 
-      <footer class="railfoot">
-        <p>The watchlist is the floor, never the ceiling.</p>
-        <p>Implied value is a claim the page shows its work for, not a forecast.</p>
-      </footer>
-    </aside>
+<main class="main">
+<header class="head">
+<div class="head-copy">
+<p class="eyebrow" id="eyebrow">Launch board</p>
+<h2 id="viewTitle">Pre-token protocols, ranked by expected launch value</h2>
+<p class="sub" id="viewSub"></p>
+</div>
+<div class="head-stats" id="headStats"></div>
+</header>
 
-    <main>
-      <header class="top">
-        <div class="top-copy">
-          <p class="eyebrow" id="eyebrow">Ranked board</p>
-          <h2 id="headline">Every pre-token protocol, ranked by implied value</h2>
-          <p id="subhead">The model scores the watchlist and the field below it with one function.</p>
-        </div>
-        <dl class="stats" id="stats"></dl>
-      </header>
+<section id="view-board" class="view on" aria-label="Launch board">
+<div class="kpis" id="kpis"></div>
+<div class="toolbar">
+<label class="search">
+<span>Search</span>
+<input id="search" type="search" placeholder="Protocol, ticker, chain" autocomplete="off" spellcheck="false">
+</label>
+<label class="select">
+<span>Sector</span>
+<select id="category"></select>
+</label>
+<div class="seg" id="scope" role="group" aria-label="Filter">
+<button type="button" data-scope="all" class="on">All</button>
+<button type="button" data-scope="watch">Watchlist</button>
+<button type="button" data-scope="farm">Farm</button>
+<button type="button" data-scope="thin">Thin</button>
+<button type="button" data-scope="skip">Skip</button>
+</div>
+<p class="count" id="count"></p>
+</div>
+<div class="table-wrap">
+<table class="board">
+<thead>
+<tr>
+<th class="sortable" data-sort="rank" aria-sort="ascending">#</th>
+<th class="sortable" data-sort="name">Protocol</th>
+<th class="sortable" data-sort="category">Sector</th>
+<th class="sortable num" data-sort="tvl">TVL</th>
+<th class="sortable num" data-sort="change">7d</th>
+<th class="sortable num" data-sort="age">Age</th>
+<th class="sortable num" data-sort="odds">Odds</th>
+<th class="sortable num" data-sort="implied">Implied</th>
+<th class="sortable num" data-sort="perHour">$/hr</th>
+<th class="sortable" data-sort="verdict">Verdict</th>
+</tr>
+</thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+<p class="foot" id="boardFoot"></p>
+</section>
 
-      <section id="boardview" aria-label="Ranked board">
-        <div class="toolbar">
-          <p id="resultLine" class="result-line">—</p>
-          <div class="legend">
-            <span class="legend-item"><i class="dot strong"></i>strong signal</span>
-            <span class="legend-item"><i class="dot building"></i>building</span>
-            <span class="legend-item"><i class="dot early"></i>early</span>
-          </div>
-        </div>
-        <div class="tablewrap">
-          <table class="board">
-            <thead>
-              <tr>
-                <th class="col-rank" scope="col">#</th>
-                <th class="col-name" scope="col"><button type="button" class="sort" data-sort="name">Protocol</button></th>
-                <th class="col-num" scope="col"><button type="button" class="sort" data-sort="tvl">TVL</button></th>
-                <th class="col-num" scope="col"><button type="button" class="sort" data-sort="change">7d</button></th>
-                <th class="col-num" scope="col"><button type="button" class="sort" data-sort="age">Age</button></th>
-                <th class="col-mid" scope="col">Signal</th>
-                <th class="col-num implied" scope="col"><button type="button" class="sort is-active" data-sort="implied">Implied value</button></th>
-                <th class="col-more" scope="col"><span class="sr">Details</span></th>
-              </tr>
-            </thead>
-            <tbody id="boardBody"></tbody>
-          </table>
-          <p class="empty" id="empty" hidden>No protocol matches those filters.</p>
-        </div>
-      </section>
+<section id="view-live" class="view" aria-label="Traded tokens">
+<div id="liveBody"></div>
+</section>
 
-      <section id="liveview" aria-label="Token trades" hidden>
-        <p class="lede">These protocols already record a token, so the market has priced them. The radar never scores them as launches; it shows them here so the two sets never mix.</p>
-        <div class="tablewrap">
-          <table class="board live">
-            <thead>
-              <tr>
-                <th class="col-rank" scope="col">#</th>
-                <th class="col-name" scope="col">Protocol</th>
-                <th class="col-mid" scope="col">Symbol</th>
-                <th class="col-num" scope="col">TVL</th>
-                <th class="col-num" scope="col">Market cap</th>
-                <th class="col-num" scope="col">MC / TVL</th>
-                <th class="col-num" scope="col">7d</th>
-              </tr>
-            </thead>
-            <tbody id="liveBody"></tbody>
-          </table>
-        </div>
-      </section>
+<section id="view-method" class="view" aria-label="Method">
+<div id="methodBody"></div>
+</section>
 
-      <section id="methodview" aria-label="Method" hidden>
-        <div class="method-grid">
-          <article class="card formula-card">
-            <p class="eyebrow">The model</p>
-            <h3>One function, every protocol</h3>
-            <pre class="formula">implied = TVL × <b>0.30</b> × <i>sector</i> × <i>growth</i> × <i>tenure</i>
+<footer class="colophon">
+<p>Ignition · <span id="footModel">ignition-2</span> · snapshot <span id="footDate">—</span> · no network, no hand-set multiples</p>
+<p class="muted">The board is an estimate of expected launch value under the fitted comps and odds; it is not investment advice.</p>
+</footer>
+</main>
+</div>
 
-growth  = 1 + clamp(Δ7d, −50%, +150%) ÷ 100 × <b>0.55</b>
-tenure  = <b>0.55</b> + min(age, 2555 d) ÷ 2555 d × <b>0.65</b></pre>
-            <p>The sector multiple is the share of TVL a launch in that sector tends to price in. Growth reads the last seven days; tenure rewards a protocol that has run longer without a token, because tenure is the record a launch is priced against. An unknown age uses one year. No protocol name is special-cased.</p>
-            <p>The signal chip is the board’s own split: the strongest fifth of a mix of momentum, tenure and size is marked <b>strong</b>, the next three tenths <b>building</b>, the rest <b>early</b>. It orders attention; it does not predict a launch.</p>
-          </article>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true" aria-label="Protocol detail">
+<div id="drawerBody"></div>
+</aside>
 
-          <article class="card">
-            <p class="eyebrow">The check</p>
-            <h3>The page re-runs the arithmetic</h3>
-            <p>The script beside this page recomputes every row from the snapshot figures it prints — TVL, change, age, sector — and compares the result with the number the board carries. Open any protocol: the detail view shows the three multipliers, the multiplication, and a check chip that turns green only when the page's number equals the board's.</p>
-            <p class="mono-line" id="checkLine">model check: —</p>
-          </article>
-
-          <article class="card">
-            <p class="eyebrow">Coverage</p>
-            <h3>The floor, never the ceiling</h3>
-            <p id="coverageCopy">—</p>
-            <div class="coverage-bars" id="coverageBars"></div>
-          </article>
-
-          <article class="card">
-            <p class="eyebrow">Farm plans</p>
-            <h3>Six steps, a cost and a time each</h3>
-            <p>Each row's plan is written from its own record: the chain comes from the protocol's chain list, the position size from its TVL tier, the hold window from its age, and the actions from its sector. A lending market gets a supply-and-borrow plan; a bridge gets a bridge-and-return plan; a young protocol gets a longer hold. Every step carries a cost and a time, and the last step is always the safe one: claim only from the protocol's own site and keep a log.</p>
-          </article>
-
-          <article class="card wide">
-            <p class="eyebrow">Sector multiples</p>
-            <h3>What a launch is priced against</h3>
-            <div class="sector-grid" id="sectorGrid"></div>
-            <p class="fine">Categories not listed use <b id="defaultSector">0.90</b>; related names match on their leading word (a “Lending” pool and an “Uncollateralized Lending” market share the same family).</p>
-          </article>
-        </div>
-      </section>
-    </main>
-  </div>
-
-  <div class="scrim" id="scrim" hidden></div>
-  <aside class="drawer" id="drawer" aria-label="Protocol detail" hidden>
-    <button type="button" class="close" id="close" aria-label="Close">×</button>
-    <div id="drawerBody"></div>
-  </aside>
-
-  <script src="../data.js"></script>
-  <script src="app.js"></script>
+<script src="../data.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
