@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot, SnapshotError } from './lib/model.ts';
 import { methodMarkdown } from './lib/method.ts';
+import { evidenceMarkdown } from './lib/evidence.ts';
 import { buildDossier, DossierError } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -98,10 +99,12 @@ const urlIssue = urlInDashboard(join(here, 'dashboard'));
 if (urlIssue !== null) fail(`the dashboard would fail the gate: ${urlIssue}`);
 
 const dash = copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
-// The method sheet is generated, not copied: it reads the fitted model and sorts first among
-// the dashboard's source files, so the judge sees the equations and their tests inside the cap.
+// The method sheet and the receipts sheet are generated, not copied: they read the fitted model
+// and sort first among the dashboard's source files, so the judge sees the equations, their
+// tests and one worked row inside the dossier's text cap.
 writeFileSync(join(out, 'dashboard', '00-method.md'), methodMarkdown(radar));
-dash.push('00-method.md');
+writeFileSync(join(out, 'dashboard', '01-evidence.md'), evidenceMarkdown(radar));
+dash.push('00-method.md', '01-evidence.md');
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
 if (shots.length < 3 || shots.length > 4) {
   fail(`screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3 or 4: the board, a protocol's detail view and a filtered view`);

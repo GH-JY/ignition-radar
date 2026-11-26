@@ -154,9 +154,9 @@ $('#nBoard').textContent = D.rows.length;
 $('#nLive').textContent = D.live.length;
 
 var badge = $('#checkBadge');
-var allOk = agreed === D.rows.length && digestOk && D.accounting.matches;
+var allOk = agreed === D.rows.length && digestOk && D.accounting.matches && boardSorted;
 badge.className = 'check ' + (allOk ? 'ok' : 'bad');
-badge.innerHTML = '<span class="dot"></span><p><b>' + agreed + ' / ' + D.rows.length + ' rows recompute</b> and agree with the board: launch value, eventual odds, implied value, P25–P75 and verdict. Board digest <b>' + D.accounting.digest + '</b> ' + (digestOk ? 're-derives from these rows' : 'does NOT re-derive') + '; the ledger sums to <b>' + D.accounting.total + '</b> (' + (D.accounting.matches ? 'equal to the snapshot' : 'NOT equal') + ').</p>';
+badge.innerHTML = '<span class="dot"></span><p><b>' + agreed + ' / ' + D.rows.length + ' rows recompute</b> and agree with the board: launch value, eventual odds, implied value, P25–P75 and verdict. Board digest <b>' + D.accounting.digest + '</b> ' + (digestOk ? 're-derives from these rows' : 'does NOT re-derive') + '; the ledger sums to <b>' + D.accounting.total + '</b> (' + (D.accounting.matches ? 'equal to the snapshot' : 'NOT equal') + '), and ranks run <b>1–' + D.rows.length + '</b> with implied value ' + (boardSorted ? 'never rising' : 'RISING somewhere') + '.</p>';
 
 function stat(label, value) {
 return '<div class="head-stat"><span>' + label + '</span><strong>' + value + '</strong></div>';
@@ -177,13 +177,15 @@ kpi('Farmable rows', COV.verdicts.farm, COV.verdicts.thin + ' thin · ' + COV.ve
 /* The evidence strip: the out-of-sample numbers the board's ordering rests on. */
 $('#evidence').innerHTML =
 '<span class="ev-label">Out-of-sample evidence</span>' +
+'<span>terms kept <b>' + keptCount() + '</b></span>' +
 '<span>comps LOO <b>×' + V.loo_error_multiple + '</b> vs flat ×' + V.flat_loo_multiple + '</span>' +
 '<span>walk-forward <b>×' + V.walk_forward_multiple + '</b></span>' +
 '<span>rank <b>' + V.loo_spearman + '</b></span>' +
 '<span>odds AUC <b>' + O.auc.toFixed(2) + '</b></span>' +
 '<span>Brier in <b>' + O.brier.toFixed(3) + '</b> · held out <b>' + O.held_out_brier.toFixed(3) + '</b> vs ' + O.brier_base.toFixed(3) + ' base</span>' +
 '<span>P10–P90 coverage <b>' + pct(V.coverage_p10_p90) + '</b> / 80%</span>' +
-'<span>P25–P75 <b>' + pct(V.coverage_p25_p75) + '</b> / 50%</span>';
+'<span>P25–P75 <b>' + pct(V.coverage_p25_p75) + '</b> / 50%</span>' +
+'<span>ranks <b>1–' + D.rows.length + '</b> · implied ' + (boardSorted ? 'never rises' : 'rises somewhere') + '</span>';
 
 /* The whole snapshot as one bar: every protocol in exactly one group, checked on this page. */
 var GROUP_SHORT = ['trading, priced', 'trading, ticker only', 'tokenless by design', 'scored on the board'];
