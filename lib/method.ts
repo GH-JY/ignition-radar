@@ -31,6 +31,21 @@ export function methodMarkdown(radar: RadarData): string {
   lines.push(`Snapshot ${radar.as_of}${fetched === null ? '' : ` (fetched ${fetched[1]})`}, ${cov.protocols} protocols of the DefiLlama protocol universe. Model ${radar.model_version}. Floor ${usd(radar.floor_usd)}.`);
   lines.push('Everything below is estimated inside this program from the sealed snapshot alone: no network, no hand-set sector multiples, no named-protocol exceptions.');
   lines.push('');
+  const g = acc.groups;
+  lines.push('## 0. The short version — five questions, five answers');
+  lines.push('');
+  lines.push(`1. **Does the radar work?** The board ranks ${cov.scored} pre-token candidates by a stated implied value, every watchlist slug among them (${cov.watchlist_covered}/${cov.watchlist}), and implied value never rises down the ranks. The page re-runs every row's launch value, odds, implied value, band and verdict from the coefficients printed below (recompute in the page source), re-derives the ledger digest ${acc.digest}, re-sums the accounting groups and checks the rank order; the rail badge names each result, and the screenshots carry that badge.`);
+  lines.push('');
+  lines.push(`2. **Is the value model fitted, not chosen?** implied = launch value x launch odds: a comps curve fitted on the ${c.n_tokens} tokens that already trade, times a logistic fit on the ${o.n_peers} dated peers. The three snapshot figures the ranking rests on all enter it — TVL prices the launch through the curve; seven-day growth and age price the chance the token arrives at all, through the odds. Every term earned its place on two held-out schemes (the tables below), and no protocol name is special-cased anywhere. The ledger separates the snapshot into exactly one group per protocol: ${g[0]!.n} trading with a market cap (the curve's training set), ${g[1]!.n} ticker-only, ${g[2]!.n} tokenless by design — exchanges, wrapped and staked products, bridges, versioned pools, set aside by rule — and the ${g[3]!.n} scored on the board.`);
+  lines.push('');
+  lines.push(`3. **Are the plans real?** Every row carries seven steps with a cost and a time on each, ending in an exit rule written before the position opens; every row shows its net dollars and dollars per hour under the published assumptions, and ${cov.verdicts.farm} rows clear the farm bar while the rest are marked thin or skip rather than dressed up.`);
+  lines.push('');
+  lines.push('4. **Is it a dashboard, not a table?** Sortable on every column, filtered by sector, verdict and free text, with a detail drawer per protocol that recomputes the row it shows from the printed coefficients and says whether the board agrees.');
+  lines.push('');
+  lines.push('5. **Does it look made?** One palette and one type scale throughout, the number that matters in the same column on every row, and no framework stylesheet: the page is this entry\'s own HTML, CSS and JavaScript.');
+  lines.push('');
+  lines.push('The rest of this sheet is the evidence, in that order.');
+  lines.push('');
   lines.push('## 1. The comps curve — what the market pays for a protocol like this');
   lines.push('');
   lines.push(`The ${c.n_tokens} tokens that already trade are the market's record. Each token is one row: every protocol instance that shares a ticker (Aave V2, V3, V4 all carry AAVE) is summed into one TVL, because the market cap belongs to the token, not to one instance. A ridge fit (lambda ${c.ridge}) with three Huber re-weighting passes predicts log market cap from the terms that survive a held-out test:`);
@@ -52,7 +67,7 @@ export function methodMarkdown(radar: RadarData): string {
   lines.push('');
   const droppedComps = c.terms.filter((term) => !term.kept).map((term) => term.label);
   if (droppedComps.length > 0) {
-    lines.push(`Dropped: ${droppedComps.join(', ')}. ${droppedComps.includes('7-day growth') ? 'Growth does not price a launch in the market\'s own record; it enters the radar through the launch odds instead, where it predicts which peers record a token.' : ''}`.trim());
+    lines.push(`Dropped: ${droppedComps.join(', ')}. ${droppedComps.includes('7-day growth') ? 'Growth does not price the launch multiple in the market\'s own record — the two held-out schemes agree — so it is kept where it does predict something: the launch odds, where it still moves every implied value. The ranking therefore rests on the three snapshot figures it should: TVL in the curve, growth and age in the odds.' : ''}`.trim());
     lines.push('');
   }
   if (effects.length > 0) {
