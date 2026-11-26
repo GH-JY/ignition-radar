@@ -54,12 +54,39 @@ export interface Snapshot {
   watchlist: string[];
 }
 
+/** One comps term's survival test: the held-out miss with the term, then with it dropped. */
+export interface TermTest {
+  key: 'size' | 'growth' | 'sector';
+  label: string;
+  /** Median LOO miss, all terms in the design. */
+  with_multiple: number;
+  /** Median LOO miss, this term dropped and the curve re-fitted per fold. */
+  without_multiple: number;
+  with_forward: number;
+  without_forward: number;
+  /** Kept only when it lowers the miss in both tests, at the precision printed. */
+  kept: boolean;
+}
+
+/** One odds term's survival test on held-out Brier: ten-fold, then walk-forward. */
+export interface OddsTermTest {
+  key: 'size' | 'age' | 'growth';
+  label: string;
+  with_brier: number;
+  without_brier: number;
+  with_forward: number;
+  without_forward: number;
+  kept: boolean;
+}
+
 /** The comps curve's fitted coefficients. */
 export interface CompsModel {
   intercept: number;
   tvl_elasticity: number;
   growth_weight: number;
   category_effects: Record<string, number>;
+  /** The term-survival record: terms that did not earn a place were refitted out. */
+  terms: TermTest[];
   ridge: number;
   n_tokens: number;
   points: { tvl_usd: number; mcap_usd: number }[];
@@ -71,6 +98,11 @@ export interface OddsModel {
   size_weight: number;
   age_weight: number;
   growth_weight: number;
+  /** The term-survival record: terms that did not earn a place were refitted out. */
+  terms: OddsTermTest[];
+  /** The surviving spec's held-out Brier on the two schemes (lower is better). */
+  held_out_brier: number;
+  held_out_forward: number;
   /** The oldest dated peer, in years: the horizon the eventual odds are measured to. */
   oldest_years: number;
   n_peers: number;
@@ -239,7 +271,7 @@ export class SnapshotError extends Error {
   }
 }
 
-export const MODEL_VERSION = 'ignition-3';
+export const MODEL_VERSION = 'ignition-4';
 
 /** The share of a launched token's FDV one farming wallet is assumed to capture (0.001%). */
 export const WALLET_SHARE = 0.00001;
@@ -541,16 +573,27 @@ function categoryTerms(rows: CompRow[]): string[] {
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** One row's design vector: intercept, log TVL, growth, then the category dummies. */
-function compDesign(row: CompRow, categories: string[]): number[] {
-  const x = [1, Math.log(row.tvl_usd), growthTerm(row.change_7d)];
-  for (const category of categories) x.push(row.category === category ? 1 : 0);
+/** Which comps terms a given fit carries: the survival test drops one at a time. */
+interface CompsTerms {
+  size: boolean;
+  growth: boolean;
+  sector: boolean;
+}
+
+const COMPS_ALL: CompsTerms = { size: true, growth: true, sector: true };
+
+/** One row's design vector: intercept, then the terms this fit carries. */
+function compDesign(row: CompRow, categories: string[], terms: CompsTerms): number[] {
+  const x = [1];
+  if (terms.size) x.push(Math.log(row.tvl_usd));
+  if (terms.growth) x.push(growthTerm(row.change_7d));
+  if (terms.sector) for (const category of categories) x.push(row.category === category ? 1 : 0);
   return x;
 }
 
 /** Fit the comps curve with a Huber re-weighting pass, so one 400x outlier cannot rule the fit. */
-function fitCompsOn(rows: CompRow[], categories: string[]): number[] {
-  const X = rows.map((row) => compDesign(row, categories));
+function fitCompsOn(rows: CompRow[], categories: string[], terms: CompsTerms): number[] {
+  const X = rows.map((row) => compDesign(row, categories, terms));
   const y = rows.map((row) => Math.log(row.mcap_usd));
   let beta = ridgeSolve(X, y, RIDGE);
   for (let pass = 0; pass < 3; pass += 1) {
@@ -563,8 +606,8 @@ function fitCompsOn(rows: CompRow[], categories: string[]): number[] {
 }
 
 /** Predict a comp row's market cap from a fitted vector. */
-function compPredict(beta: number[], row: CompRow, categories: string[]): number {
-  const x = compDesign(row, categories);
+function compPredict(beta: number[], row: CompRow, categories: string[], terms: CompsTerms): number {
+  const x = compDesign(row, categories, terms);
   return Math.exp(beta.reduce((sum, bj, j) => sum + bj * x[j]!, 0));
 }
 
@@ -579,13 +622,13 @@ function flatMultiple(rows: CompRow[]): number {
  * the median |log(predicted/actual)|, shown as a multiplicative factor: 3.5 means the typical
  * miss is a factor of 3.5 either way.
  */
-function validateComps(rows: CompRow[], categories: string[]): Validation {
+function validateComps(rows: CompRow[], categories: string[], terms: CompsTerms): Validation {
   const looPred: number[] = [];
   const actual: number[] = [];
   for (let i = 0; i < rows.length; i += 1) {
     const train = rows.filter((_, j) => j !== i);
-    const beta = fitCompsOn(train, categories);
-    looPred.push(compPredict(beta, rows[i]!, categories));
+    const beta = fitCompsOn(train, categories, terms);
+    looPred.push(compPredict(beta, rows[i]!, categories, terms));
     actual.push(rows[i]!.mcap_usd);
   }
   const flatPred: number[] = [];
@@ -603,8 +646,8 @@ function validateComps(rows: CompRow[], categories: string[]): Validation {
   const forwardActual: number[] = [];
   for (let i = half; i < ordered.length; i += 1) {
     const train = ordered.slice(0, i);
-    const beta = fitCompsOn(train, categories);
-    forwardPred.push(compPredict(beta, ordered[i]!, categories));
+    const beta = fitCompsOn(train, categories, terms);
+    forwardPred.push(compPredict(beta, ordered[i]!, categories, terms));
     forwardFlat.push(flatMultiple(train) * ordered[i]!.tvl_usd);
     forwardActual.push(ordered[i]!.mcap_usd);
   }
@@ -640,26 +683,60 @@ function validateComps(rows: CompRow[], categories: string[]): Validation {
   };
 }
 
-/** Fit and validate the comps curve once. */
+/**
+ * Fit and validate the comps curve once. Each term faces a survival test: the curve is
+ * re-fitted on both held-out schemes with the term dropped. A term leaves the equation only
+ * when both schemes agree the curve is worse with it; a split verdict keeps it. The
+ * surviving set is refitted, so the published coefficients are the ones that earned a place.
+ */
 function fitComps(snapshot: Snapshot): { model: CompsModel; validation: Validation } {
   const rows = compRows(snapshot);
   const categories = categoryTerms(rows);
-  const beta = fitCompsOn(rows, categories);
-  const effects: Record<string, number> = {};
-  categories.forEach((category, i) => {
-    effects[category] = beta[3 + i]!;
+  const full = validateComps(rows, categories, COMPS_ALL);
+  const variants: { key: TermTest['key']; label: string; terms: CompsTerms }[] = [
+    { key: 'size', label: 'size, ln TVL', terms: { size: false, growth: true, sector: true } },
+    { key: 'growth', label: '7-day growth', terms: { size: true, growth: false, sector: true } },
+    { key: 'sector', label: 'sector effects', terms: { size: true, growth: true, sector: false } },
+  ];
+  const tests: TermTest[] = variants.map((variant) => {
+    const without = validateComps(rows, categories, variant.terms);
+    // A term is dropped only when both held-out schemes agree the curve is worse with it.
+    // A split verdict is not evidence against the term, so the term stays.
+    const worseWithout = without.loo_error_multiple < full.loo_error_multiple && without.walk_forward_multiple < full.walk_forward_multiple;
+    return {
+      key: variant.key,
+      label: variant.label,
+      with_multiple: full.loo_error_multiple,
+      without_multiple: without.loo_error_multiple,
+      with_forward: full.walk_forward_multiple,
+      without_forward: without.walk_forward_multiple,
+      kept: !worseWithout,
+    };
   });
+  const terms: CompsTerms = {
+    size: tests.find((test) => test.key === 'size')!.kept,
+    growth: tests.find((test) => test.key === 'growth')!.kept,
+    sector: tests.find((test) => test.key === 'sector')!.kept,
+  };
+  const beta = fitCompsOn(rows, categories, terms);
+  let position = 1;
+  const intercept = beta[0]!;
+  const tvlElasticity = terms.size ? beta[position++]! : 0;
+  const growthWeight = terms.growth ? beta[position++]! : 0;
+  const effects: Record<string, number> = {};
+  if (terms.sector) for (const category of categories) effects[category] = beta[position++]!;
   return {
     model: {
-      intercept: beta[0]!,
-      tvl_elasticity: beta[1]!,
-      growth_weight: beta[2]!,
+      intercept,
+      tvl_elasticity: tvlElasticity,
+      growth_weight: growthWeight,
       category_effects: effects,
+      terms: tests,
       ridge: RIDGE,
       n_tokens: rows.length,
       points: rows.map((row) => ({ tvl_usd: Math.round(row.tvl_usd), mcap_usd: Math.round(row.mcap_usd) })),
     },
-    validation: validateComps(rows, categories),
+    validation: validateComps(rows, categories, terms),
   };
 }
 
@@ -689,9 +766,68 @@ function oddsRows(snapshot: Snapshot): OddsRow[] {
   return rows;
 }
 
-/** The logistic design: intercept, log10 size in millions, log(1+age), clipped growth. */
-function oddsDesign(row: OddsRow): number[] {
-  return [1, Math.log10(row.tvl_usd / 1e6), Math.log(1 + row.age_years), row.growth];
+/** Which odds terms a given fit carries: the survival test drops one at a time. */
+interface OddsTerms {
+  size: boolean;
+  age: boolean;
+  growth: boolean;
+}
+
+const ODDS_ALL: OddsTerms = { size: true, age: true, growth: true };
+
+/** The logistic design: intercept, then the terms this fit carries. */
+function oddsDesign(row: OddsRow, terms: OddsTerms): number[] {
+  const x = [1];
+  if (terms.size) x.push(Math.log10(row.tvl_usd / 1e6));
+  if (terms.age) x.push(Math.log(1 + row.age_years));
+  if (terms.growth) x.push(row.growth);
+  return x;
+}
+
+/** P(the row records a token), under a fitted vector and the terms it carries. */
+function oddsShare(beta: number[], row: OddsRow, terms: OddsTerms): number {
+  const x = oddsDesign(row, terms);
+  const z = beta.reduce((sum, bj, j) => sum + bj * x[j]!, 0);
+  return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+}
+
+/** One Brier score: the mean squared difference between fitted share and outcome. */
+function brierScore(predicted: number[], actual: number[]): number {
+  return predicted.reduce((sum, p, i) => sum + (p - actual[i]!) ** 2, 0) / Math.max(1, predicted.length);
+}
+
+/**
+ * The odds model's held-out record on two schemes. Ten-fold: each peer is scored by a fit
+ * that never saw it, folds dealt along the age order so every fold spans the cohorts. Walk
+ * forward: the older half trains, progressively younger peers are scored by the record that
+ * precedes them. Both are Brier scores, lower is better.
+ */
+function oddsHeldOut(rows: OddsRow[], terms: OddsTerms): { tenfold: number; forward: number } {
+  const y = rows.map((row) => (row.has_token ? 1 : 0));
+  const byAge = rows.map((row, index) => ({ row, index })).sort((a, b) => a.row.age_years - b.row.age_years || a.index - b.index);
+  const fold = new Map<number, number>();
+  byAge.forEach((item, rank) => fold.set(item.index, rank % 10));
+  const predicted = new Array<number>(rows.length).fill(0);
+  for (let f = 0; f < 10; f += 1) {
+    const trainIdx = rows.map((_, i) => i).filter((i) => fold.get(i) !== f);
+    const testIdx = rows.map((_, i) => i).filter((i) => fold.get(i) === f);
+    if (testIdx.length === 0 || trainIdx.length === 0) continue;
+    const beta = logisticFit(trainIdx.map((i) => oddsDesign(rows[i]!, terms)), trainIdx.map((i) => y[i]!));
+    for (const i of testIdx) predicted[i] = oddsShare(beta, rows[i]!, terms);
+  }
+  const tenfold = brierScore(predicted, y);
+  const ordered = byAge.map((item) => item.row).reverse();
+  const half = Math.floor(ordered.length / 2);
+  let sum = 0;
+  let count = 0;
+  for (let i = half; i < ordered.length; i += 1) {
+    const train = ordered.slice(0, i);
+    const beta = logisticFit(train.map((row) => oddsDesign(row, terms)), train.map((row) => (row.has_token ? 1 : 0)));
+    const p = oddsShare(beta, ordered[i]!, terms);
+    sum += (p - (ordered[i]!.has_token ? 1 : 0)) ** 2;
+    count += 1;
+  }
+  return { tenfold, forward: sum / Math.max(1, count) };
 }
 
 /** P(the peer records a token today), under the fitted logistic model. */
@@ -723,15 +859,48 @@ function fitLaunchOdds(snapshot: Snapshot): {
   calibration: { band: string; n: number; predicted: number; observed: number }[];
 } {
   const rows = oddsRows(snapshot);
-  const X = rows.map(oddsDesign);
+  const full = oddsHeldOut(rows, ODDS_ALL);
+  const variants: { key: OddsTermTest['key']; label: string; terms: OddsTerms }[] = [
+    { key: 'size', label: 'size, log10 TVL', terms: { size: false, age: true, growth: true } },
+    { key: 'age', label: 'age, ln(1 + years)', terms: { size: true, age: false, growth: true } },
+    { key: 'growth', label: '7-day growth', terms: { size: true, age: true, growth: false } },
+  ];
+  const tests: OddsTermTest[] = variants.map((variant) => {
+    const without = oddsHeldOut(rows, variant.terms);
+    const withBrier = Math.round(full.tenfold * 1e4) / 1e4;
+    const withForward = Math.round(full.forward * 1e4) / 1e4;
+    const withoutBrier = Math.round(without.tenfold * 1e4) / 1e4;
+    const withoutForward = Math.round(without.forward * 1e4) / 1e4;
+    // Same survival rule as the comps curve: dropped only when both held-out schemes agree.
+    return {
+      key: variant.key,
+      label: variant.label,
+      with_brier: withBrier,
+      without_brier: withoutBrier,
+      with_forward: withForward,
+      without_forward: withoutForward,
+      kept: !(withoutBrier < withBrier && withoutForward < withForward),
+    };
+  });
+  const terms: OddsTerms = {
+    size: tests.find((test) => test.key === 'size')!.kept,
+    age: tests.find((test) => test.key === 'age')!.kept,
+    growth: tests.find((test) => test.key === 'growth')!.kept,
+  };
+  const X = rows.map((row) => oddsDesign(row, terms));
   const y = rows.map((row) => (row.has_token ? 1 : 0));
   const beta = logisticFit(X, y);
+  let position = 1;
   const oldestYears = rows.reduce((oldest, row) => Math.max(oldest, row.age_years), 0);
+  const finalHeldOut = terms.size && terms.age && terms.growth ? full : oddsHeldOut(rows, terms);
   const model: OddsModel = {
     intercept: beta[0]!,
-    size_weight: beta[1]!,
-    age_weight: beta[2]!,
-    growth_weight: beta[3]!,
+    size_weight: terms.size ? beta[position++]! : 0,
+    age_weight: terms.age ? beta[position++]! : 0,
+    growth_weight: terms.growth ? beta[position++]! : 0,
+    terms: tests,
+    held_out_brier: Math.round(finalHeldOut.tenfold * 1e4) / 1e4,
+    held_out_forward: Math.round(finalHeldOut.forward * 1e4) / 1e4,
     oldest_years: Math.round(oldestYears * 100) / 100,
     n_peers: rows.length,
     n_tokens: rows.filter((row) => row.has_token).length,

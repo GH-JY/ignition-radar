@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/token-radar-01/GH-JY/ignition-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/GH-JY/ignition-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-Ignition is a token launch radar for DefiLlama's sealed snapshot: one model scores every pre-token protocol, the watchlist and the field below it, ranks the board by implied value, keeps the protocols that already record a token in a separate view, and gives every row a six-step farm plan with a cost and a time.
+Ignition is a token launch radar for DefiLlama's sealed snapshot: one fitted model scores every pre-token protocol, the watchlist and the field below it, ranks the board by implied value, keeps the protocols that already record a token in a separate view, and gives every row a seven-step farm plan with a cost and a time.
 
 ## Run it
 
@@ -16,7 +16,7 @@ The grader mounts the sealed snapshot at `/input/snapshot.json` and reads `/outp
 
 ## How it scores
 
-`implied = TVL × 0.30 × sector × growth × tenure`. The sector multiple is the share of TVL a launch in that sector tends to price in; growth reads the last seven days, clamped to −50%..+150% with a 0.55 weight; tenure rewards a protocol that has run longer without a token, 0.55 plus up to 0.65 over 2,555 days, with one year assumed when the age is unknown. No protocol name is special-cased. The page re-runs the arithmetic on every row it shows and checks the result against the board it was handed.
+`implied = launch value × eventual odds`, both fitted inside the program. The launch value is a ridge comps curve (three Huber passes) of log market cap on log TVL and sector dummies, with the sector effects estimated, not hand-set. The eventual odds come from a logistic fit of token presence on age and seven-day growth across every dated protocol, differenced to the oldest peer's age. Every term on both sides faces a survival test on two held-out schemes and is dropped only when both agree the model is worse with it; the surviving spec is refit, and its held-out record is printed on the page. No protocol name is special-cased. The page re-runs the arithmetic on every row it shows and checks the result against the board it was handed.
 
 ---
 

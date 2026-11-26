@@ -37,6 +37,24 @@ return years < 1 ? Math.round(days / 30.4) + 'mo' : years.toFixed(1) + 'y';
 function coef(n) { return (n >= 0 ? '+' : '−') + Math.abs(n).toFixed(3); }
 function num3(n) { return (n >= 0 ? '+' : '−') + Math.abs(n).toFixed(3); }
 function rate(n) { return (n >= 0 ? '+$' : '−$') + Math.abs(n).toFixed(1); }
+function termOf(model, key) {
+var terms = model.terms || [];
+for (var i = 0; i < terms.length; i += 1) if (terms[i].key === key) return terms[i];
+return null;
+}
+function keptOf(model, key) {
+var term = termOf(model, key);
+return term === null || term.kept;
+}
+function keptCount() {
+var all = (C.terms || []).concat(O.terms || []);
+return all.filter(function (term) { return term.kept; }).length + '/' + all.length;
+}
+function termWords(model, words) {
+var phrases = (model.terms || []).filter(function (term) { return term.kept; }).map(function (term) { return words[term.key]; }).filter(function (word) { return !!word; });
+if (phrases.length <= 1) return phrases.join('');
+return phrases.slice(0, -1).join(', ') + ' and ' + phrases[phrases.length - 1];
+}
 
 /* ---------------------------------------------------------------- the model, re-run in the page */
 
@@ -152,7 +170,7 @@ $('#kpis').innerHTML =
 kpi('Snapshot protocols', COV.protocols, COV.trading + ' trading · ' + COV.pre_token + ' pre-token') +
 kpi('Launch candidates', COV.scored, COV.tokenless_by_design + ' tokenless by design', 'hot') +
 kpi('Watchlist covered', COV.watchlist_covered + '/' + COV.watchlist, 'every listed slug scored', 'good') +
-kpi('Odds model AUC', O.auc.toFixed(2), O.n_peers + ' peers · Brier ' + O.brier.toFixed(3) + ' vs ' + O.brier_base.toFixed(3) + ' base') +
+kpi('Odds model AUC', O.auc.toFixed(2), O.n_peers + ' peers · Brier ' + O.brier.toFixed(3) + ' in · ' + O.held_out_brier.toFixed(3) + ' held out') +
 kpi('Comps held-out miss', '×' + V.loo_error_multiple, 'flat ×' + V.flat_loo_multiple + ' · walk ×' + V.walk_forward_multiple + ' · rank ' + V.loo_spearman) +
 kpi('Farmable rows', COV.verdicts.farm, COV.verdicts.thin + ' thin · ' + COV.verdicts.skip + ' skip', 'good');
 
@@ -163,9 +181,22 @@ $('#evidence').innerHTML =
 '<span>walk-forward <b>×' + V.walk_forward_multiple + '</b></span>' +
 '<span>rank <b>' + V.loo_spearman + '</b></span>' +
 '<span>odds AUC <b>' + O.auc.toFixed(2) + '</b></span>' +
-'<span>Brier <b>' + O.brier.toFixed(3) + '</b> vs ' + O.brier_base.toFixed(3) + '</span>' +
+'<span>Brier in <b>' + O.brier.toFixed(3) + '</b> · held out <b>' + O.held_out_brier.toFixed(3) + '</b> vs ' + O.brier_base.toFixed(3) + ' base</span>' +
 '<span>P10–P90 coverage <b>' + pct(V.coverage_p10_p90) + '</b> / 80%</span>' +
 '<span>P25–P75 <b>' + pct(V.coverage_p25_p75) + '</b> / 50%</span>';
+
+/* The whole snapshot as one bar: every protocol in exactly one group, checked on this page. */
+var GROUP_SHORT = ['trading, priced', 'trading, ticker only', 'tokenless by design', 'scored on the board'];
+var GROUP_CLASS = ['g1', 'g2', 'g3', 'g4'];
+$('#ledgerStrip').innerHTML =
+'<span class="ls-label">Whole snapshot</span>' +
+'<span class="ls-bar">' + D.accounting.groups.map(function (group, i) {
+return '<i class="' + GROUP_CLASS[i % 4] + '" style="width:' + (group.n / Math.max(1, D.accounting.total) * 100).toFixed(2) + '%" title="' + esc(group.label) + '"></i>';
+}).join('') + '</span>' +
+'<span class="ls-legend">' + D.accounting.groups.map(function (group, i) {
+return '<em><i class="' + GROUP_CLASS[i % 4] + '"></i>' + group.n + ' ' + GROUP_SHORT[i % 4] + '</em>';
+}).join('') + '</span>' +
+'<span class="ls-check ' + (D.accounting.matches && digestOk ? 'ok' : 'bad') + '">' + (D.accounting.matches && digestOk ? '✓' : '×') + ' ' + D.accounting.total + ' = ' + COV.protocols + ' · watchlist ' + COV.watchlist_covered + '/' + COV.watchlist + ' · digest ' + D.accounting.digest + '</span>';
 
 var VIEWS = {
 board: {
@@ -254,7 +285,7 @@ return '<tr data-slug="' + esc(row.slug) + '"' + (row.rank <= 3 ? ' class="top3"
 '<td class="num tv">' + money(row.tvl_usd) + '</td>' +
 '<td class="num change ' + changeClass + '">' + (row.change_7d == null ? '—' : signedPct(row.change_7d)) + '</td>' +
 '<td class="num age">' + ageLabel(row.age_days) + '</td>' +
-'<td class="num odds">' + pct(row.odds_eventual) + '</td>' +
+'<td class="num odds"><span class="meter" aria-hidden="true"><i style="width:' + Math.max(2, Math.min(100, row.odds_eventual * 100)).toFixed(1) + '%"></i></span>' + pct(row.odds_eventual) + '</td>' +
 '<td class="num implied">' + money(row.implied_value_usd) + '</td>' +
 '<td class="num range">' + money(row.implied_low_usd) + '–' + money(row.implied_high_usd) + '</td>' +
 '<td class="num net ' + (row.net_usd >= 0 ? 'pos' : 'neg') + '">' + rate(row.net_usd) + '</td>' +
@@ -333,17 +364,24 @@ row.farm_steps.map(function (step) { return '<li><p>' + stepHtml(step) + '</p></
 '</ol></div>' +
 
 '<div class="d-card"><h3>The comps curve <b>' + C.n_tokens + ' traded tokens</b></h3>' +
-'<div class="eq">ln mcap = ' + C.intercept.toFixed(3) + ' + ' + C.tvl_elasticity.toFixed(3) + ' × ln ' + full(row.tvl_usd) + '<br>' +
-'&nbsp;&nbsp;+ (' + C.growth_weight.toFixed(3) + ') × (' + growth.toFixed(2) + ') growth ' + (effect >= 0 ? '+ ' : '− ') + Math.abs(effect).toFixed(3) + ' sector<br>' +
-'&nbsp;&nbsp;= ' + logValue.toFixed(3) + ' → launch value <b>' + money(m.launch) + '</b></div>' +
+'<div class="eq">' + (function () {
+var eq = 'ln mcap = ' + C.intercept.toFixed(3);
+if (keptOf(C, 'size')) eq += ' + ' + C.tvl_elasticity.toFixed(3) + ' × ln ' + full(row.tvl_usd);
+if (keptOf(C, 'growth')) eq += '<br>&nbsp;&nbsp;+ (' + C.growth_weight.toFixed(3) + ') × (' + growth.toFixed(2) + ') growth';
+if (keptOf(C, 'sector')) eq += (effect >= 0 ? ' + ' : ' − ') + Math.abs(effect).toFixed(3) + ' sector';
+return eq + '<br>&nbsp;&nbsp;= ' + logValue.toFixed(3) + ' → launch value <b>' + money(m.launch) + '</b>';
+})() + '</div>' +
 '<div class="d-rows">' +
 '<div class="d-row"><span>ln TVL</span><b>' + logTvl.toFixed(3) + '</b></div>' +
-'<div class="d-row"><span>Seven-day growth term, clipped</span><b>' + growth.toFixed(2) + '</b></div>' +
-'<div class="d-row"><span>Sector effect, log points</span><b>' + num3(effect) + '</b></div>' +
+(keptOf(C, 'growth') ? '<div class="d-row"><span>Seven-day growth term, clipped</span><b>' + growth.toFixed(2) + '</b></div>' : '') +
+(keptOf(C, 'sector') ? '<div class="d-row"><span>Sector effect, log points</span><b>' + num3(effect) + '</b></div>' : '') +
 '<div class="d-row"><span>P25–P75 band, ×' + Math.exp(V.q25).toFixed(2) + ' to ×' + Math.exp(V.q75).toFixed(2) + '</span><b>' + money(m.launch * Math.exp(V.q25)) + ' – ' + money(m.launch * Math.exp(V.q75)) + '</b></div>' +
 '<div class="d-row total"><span>Fitted launch value</span><b>' + money(m.launch) + '</b></div>' +
 '</div>' +
-'<p class="d-note">The band is the leave-one-out residual interval, checked on the walk-forward folds: ' + pct(V.coverage_p10_p90) + ' of actuals inside P10–P90 (nominal 80%), ' + pct(V.coverage_p25_p75) + ' inside P25–P75 (nominal 50%).</p></div>' +
+'<p class="d-note">The band is the leave-one-out residual interval, checked on the walk-forward folds: ' + pct(V.coverage_p10_p90) + ' of actuals inside P10–P90 (nominal 80%), ' + pct(V.coverage_p25_p75) + ' inside P25–P75 (nominal 50%). ' + (function () {
+var dropped = (C.terms || []).filter(function (term) { return !term.kept; }).map(function (term) { return term.label; });
+return dropped.length ? 'Dropped by the term-survival test: ' + dropped.join(', ') + '.' : 'All three terms survived the held-out test.';
+})() + '</p></div>' +
 
 '<div class="d-card"><h3>Launch odds <b>AUC ' + O.auc.toFixed(2) + ' · Brier ' + O.brier.toFixed(3) + '</b></h3>' +
 '<div class="eq">P(token today) = ' + pct(now) + ' · P(token by the oldest peer, ' + oldest.toFixed(1) + 'y) = ' + pct(end) + '<br>' +
@@ -353,7 +391,10 @@ row.farm_steps.map(function (step) { return '<li><p>' + stepHtml(step) + '</p></
 '<div class="d-row"><span>Peer share at the oldest peer\'s age, fitted</span><b>' + pct(end) + '</b></div>' +
 '<div class="d-row total"><span>Eventual launch odds</span><b>' + pct(m.odds) + '</b></div>' +
 '</div>' +
-'<p class="d-note">The horizon is the oldest dated peer in the snapshot (' + O.oldest_years + ' years), not an arbitrary year. AUC on the ' + O.n_peers + ' peers; Brier ' + O.brier.toFixed(3) + ' against ' + O.brier_base.toFixed(3) + ' for the base rate alone.</p></div>' +
+'<p class="d-note">The horizon is the oldest dated peer in the snapshot (' + O.oldest_years + ' years), not an arbitrary year. AUC on the ' + O.n_peers + ' peers; Brier ' + O.brier.toFixed(3) + ' in-sample and ' + O.held_out_brier.toFixed(3) + ' held out, against ' + O.brier_base.toFixed(3) + ' for the base rate. ' + (function () {
+var dropped = (O.terms || []).filter(function (term) { return !term.kept; }).map(function (term) { return term.label; });
+return dropped.length ? 'Dropped by the term-survival test: ' + dropped.join(', ') + '.' : 'All three terms survived the held-out test.';
+})() + '</p></div>' +
 
 '<p class="d-note">This drawer recomputes the row from the fitted coefficients: launch value ' + money(m.launch) + ', odds ' + pct(m.odds) + ', implied ' + full(m.implied) + ' inside ' + full(m.range.low) + '–' + full(m.range.high) + '. The board carries ' + full(row.implied_value_usd) + ' with ' + full(row.implied_low_usd) + '–' + full(row.implied_high_usd) + '; ' + (auditBySlug[row.slug].ok ? 'the two agree.' : 'they differ.') + '</p>';
 
@@ -486,23 +527,57 @@ return '<table class="m-table"><thead><tr><th>TVL tier</th><th class="num">Posit
 '<p class="lead" style="margin-top:10px">Gas $' + E.gas_base_usd + ' up front plus $' + E.gas_weekly_usd + ' a week; ' + E.setup_hours + ' hours to set up plus ' + E.weekly_hours + ' a week; capital costs ' + (E.opportunity_rate * 100).toFixed(0) + '% a year forgone; hold ' + E.hold_base_weeks + ' to ' + E.hold_tiers[0].weeks + ' weeks by age (' + E.hold_unknown_weeks + ' when unlisted). Farm at net ≥ ' + full(E.farm_net_usd) + ' and ≥ $' + E.farm_per_hour_usd + '/h; thin at net ≥ ' + full(E.thin_net_usd) + ' and ≥ $' + E.thin_per_hour_usd + '/h.</p>';
 }
 
+function compsEquationHtml() {
+var eq = 'ln mcap = ' + C.intercept.toFixed(4);
+if (keptOf(C, 'size')) eq += ' + ' + C.tvl_elasticity.toFixed(4) + ' × ln TVL';
+if (keptOf(C, 'growth')) eq += '<br>+ (' + C.growth_weight.toFixed(4) + ') × growth';
+if (keptOf(C, 'sector')) eq += ' + sector';
+return '<div class="eq">' + eq + '<br><span class="mut">' + (keptOf(C, 'growth') ? 'growth = clamp(7d change / 100, −0.5, 1.5) · ' : '') + 'a term stays unless both held-out schemes agree the curve is worse with it</span></div>';
+}
+
+function oddsEquationHtml() {
+var eq = 'logit P = ' + O.intercept.toFixed(4);
+if (keptOf(O, 'size')) eq += ' + ' + O.size_weight.toFixed(4) + ' × log10(TVL $M)';
+if (keptOf(O, 'age')) eq += '<br>+ ' + O.age_weight.toFixed(4) + ' × ln(1 + age)';
+if (keptOf(O, 'growth')) eq += ' + (' + O.growth_weight.toFixed(4) + ') × growth';
+return '<div class="eq">' + eq + '<br>odds = [P(oldest ' + O.oldest_years + 'y) − P(age)] / [1 − P(age)], clamped 2%–95%</div>';
+}
+
+function compTermsHtml() {
+return '<table class="m-table terms"><thead><tr><th>Term</th><th class="num">Miss with</th><th class="num">Without</th><th class="num">Walk with</th><th class="num">Walk without</th><th>Place</th></tr></thead><tbody>' +
+(C.terms || []).map(function (term) {
+return '<tr><td>' + esc(term.label) + '</td><td class="num">×' + term.with_multiple + '</td><td class="num">×' + term.without_multiple + '</td><td class="num">×' + term.with_forward + '</td><td class="num">×' + term.without_forward + '</td><td><span class="keep ' + (term.kept ? 'yes' : 'no') + '">' + (term.kept ? 'kept' : 'dropped') + '</span></td></tr>';
+}).join('') + '</tbody></table>' +
+'<p class="lead" style="margin-top:8px">Every fold re-fits the curve with the term and without it. A term leaves the equation only when both held-out schemes agree the curve is worse with it; a split verdict keeps it, and the surviving set is refitted.</p>';
+}
+
+function oddsTermsHtml() {
+return '<table class="m-table terms"><thead><tr><th>Term</th><th class="num">Brier with</th><th class="num">Without</th><th class="num">Walk with</th><th class="num">Walk without</th><th>Place</th></tr></thead><tbody>' +
+(O.terms || []).map(function (term) {
+return '<tr><td>' + esc(term.label) + '</td><td class="num">' + term.with_brier.toFixed(4) + '</td><td class="num">' + term.without_brier.toFixed(4) + '</td><td class="num">' + term.with_forward.toFixed(4) + '</td><td class="num">' + term.without_forward.toFixed(4) + '</td><td><span class="keep ' + (term.kept ? 'yes' : 'no') + '">' + (term.kept ? 'kept' : 'dropped') + '</span></td></tr>';
+}).join('') + '</tbody></table>' +
+'<p class="lead" style="margin-top:8px">Ten-fold and walk-forward Brier on the peers, each fit re-run without the term; lower is better. The same survival rule applies, so a term with a split verdict stays.</p>';
+}
+
 function methodHtml() {
 var forwardN = V.n - Math.floor(V.n / 2);
 return '<div class="m-hero"><h3>One snapshot in, a ranked field of launches out</h3>' +
-'<p>Three pieces, each fitted or computed inside the program: the comps curve turns a protocol\'s TVL, seven-day growth and sector into a launch value and a measured interval; the launch record turns its size and age into eventual odds; the farm arithmetic turns the two into a plan verdict. No sector multiple is hand-set and no protocol is special-cased.</p>' +
+'<p>Three pieces, each fitted or computed inside the program: the comps curve turns a protocol\'s ' + termWords(C, { size: 'TVL', growth: 'seven-day growth', sector: 'sector' }) + ' into a launch value and a measured interval; the launch record turns ' + termWords(O, { size: 'TVL', age: 'age', growth: 'seven-day growth' }) + ' into eventual odds; the farm arithmetic turns the two into a plan verdict. No sector multiple is hand-set and no protocol is special-cased.</p>' +
 '<div class="m-formula">' +
 '<span class="m-pill">implied = launch value × odds</span>' +
 '<span class="m-pill">comps <b>' + C.n_tokens + '</b> tokens · held-out ×' + V.loo_error_multiple + '</span>' +
 '<span class="m-pill">launch record <b>' + O.n_peers + '</b> peers · AUC ' + O.auc.toFixed(2) + '</span>' +
+'<span class="m-pill">terms that survived <b>' + keptCount() + '</b></span>' +
 '<span class="m-pill">ledger <b>' + D.accounting.total + '</b> protocols · digest ' + D.accounting.digest + '</span>' +
 '<span class="m-pill">board <b>' + COV.scored + '</b> candidates · watchlist ' + COV.watchlist_covered + '/' + COV.watchlist + '</span>' +
 '</div></div>' +
 
 '<div class="m-grid">' +
 '<div class="m-card"><h3>1 · The comps curve <em>launch value</em></h3>' +
-'<p class="lead">One row per token, all protocol instances sharing a ticker summed into one TVL. Ridge fit (λ ' + C.ridge + ') with Huber re-weighting, so one 400× outlier cannot rule the line.</p>' +
-'<div class="eq">ln mcap = ' + C.intercept.toFixed(4) + ' + ' + C.tvl_elasticity.toFixed(4) + ' × ln TVL<br>+ (' + C.growth_weight.toFixed(4) + ') × growth + sector<br><span class="mut">growth = clamp(7d change / 100, −0.5, 1.5)</span></div>' +
-effectsHtml() +
+'<p class="lead">One row per token, all protocol instances sharing a ticker summed into one TVL. Ridge fit (λ ' + C.ridge + ') with Huber re-weighting, so one 400× outlier cannot rule the line. Every term is put to a survival test on both held-out schemes before it keeps its place.</p>' +
+compsEquationHtml() +
+compTermsHtml() +
+(Object.keys(C.category_effects).length ? effectsHtml() : '') +
 '<table class="m-table"><thead><tr><th>Test</th><th class="num">n</th><th class="num">Median miss</th><th class="num">Flat baseline</th><th class="num">Spearman</th></tr></thead><tbody>' +
 '<tr><td>Leave one out</td><td class="num">' + V.n + '</td><td class="num good">×' + V.loo_error_multiple + '</td><td class="num">×' + V.flat_loo_multiple + '</td><td class="num">' + V.loo_spearman + '</td></tr>' +
 '<tr><td>Walk forward</td><td class="num">' + forwardN + '</td><td class="num good">×' + V.walk_forward_multiple + '</td><td class="num">×' + V.flat_loo_multiple + '</td><td class="num">—</td></tr>' +
@@ -513,11 +588,12 @@ effectsHtml() +
 scatterSvg() + '</div>' +
 
 '<div class="m-card"><h3>2 · The launch record <em>eventual odds</em></h3>' +
-'<p class="lead">Every dated protocol is a peer: does it record a token today, and how old is it? A logistic fit of token presence on size, age and growth, then differenced to the oldest peer\'s age among the still-tokenless.</p>' +
-'<div class="eq">logit P = ' + O.intercept.toFixed(4) + ' + ' + O.size_weight.toFixed(4) + ' × log10(TVL $M)<br>+ ' + O.age_weight.toFixed(4) + ' × ln(1 + age) + (' + O.growth_weight.toFixed(4) + ') × growth<br>odds = [P(oldest ' + O.oldest_years + 'y) − P(age)] / [1 − P(age)], clamped 2%–95%</div>' +
+'<p class="lead">Every dated protocol is a peer: does it record a token today, and how old is it? A logistic fit of token presence on the terms that survive a held-out Brier test, then differenced to the oldest peer\'s age among the still-tokenless.</p>' +
+oddsEquationHtml() +
+oddsTermsHtml() +
 calibrationHtml() +
-'<table class="m-table"><thead><tr><th>Peers</th><th class="num">With token</th><th class="num">AUC</th><th class="num">Brier</th><th class="num">Base rate Brier</th></tr></thead><tbody><tr><td>' + O.n_peers + '</td><td class="num">' + O.n_tokens + '</td><td class="num good">' + O.auc.toFixed(2) + '</td><td class="num good">' + O.brier.toFixed(3) + '</td><td class="num">' + O.brier_base.toFixed(3) + '</td></tr></tbody></table>' +
-'<p class="lead" style="margin-top:8px">AUC is rank quality on the peers themselves: 0.5 is a coin toss. Brier must beat the base-rate column, or the fit is not earning its keep. Calibration compares the fitted share with the observed share in each age band; the horizon is the oldest dated peer (' + O.oldest_years + ' years), so a five-year-old protocol is measured over its remaining plausible life.</p></div>' +
+'<table class="m-table"><thead><tr><th>Peers</th><th class="num">With token</th><th class="num">AUC</th><th class="num">Brier in-sample</th><th class="num">Held out</th><th class="num">Base rate</th></tr></thead><tbody><tr><td>' + O.n_peers + '</td><td class="num">' + O.n_tokens + '</td><td class="num good">' + O.auc.toFixed(2) + '</td><td class="num good">' + O.brier.toFixed(3) + '</td><td class="num good">' + O.held_out_brier.toFixed(3) + '</td><td class="num">' + O.brier_base.toFixed(3) + '</td></tr></tbody></table>' +
+'<p class="lead" style="margin-top:8px">AUC is rank quality on the peers themselves: 0.5 is a coin toss. Brier must beat the base-rate column, or the fit is not earning its keep; the held-out column is the number the term survival used. Calibration compares the fitted share with the observed share in each age band; the horizon is the oldest dated peer (' + O.oldest_years + ' years), so a five-year-old protocol is measured over its remaining plausible life.</p></div>' +
 
 '<div class="m-card"><h3>3 · Coverage <em>every protocol accounted for</em></h3>' + funnelHtml() + ledgerHtml() + '</div>' +
 
@@ -532,6 +608,7 @@ economicsHtml() + '</div>' +
 '<div class="check-item"><span class="ok">' + (D.accounting.matches ? '✓' : '×') + '</span><span><b>Ledger ' + D.accounting.total + ' / ' + COV.protocols + '</b>: every snapshot protocol is in exactly one accounting group, and the groups sum to the total.</span></div>' +
 '<div class="check-item"><span class="ok">' + (digestOk ? '✓' : '×') + '</span><span><b>Board digest ' + D.accounting.digest + '</b>: re-derived in this page from rank|slug|implied on every row and compared with the ledger\'s copy.</span></div>' +
 '<div class="check-item"><span class="ok">' + (V.coverage_p10_p90 >= 0.7 && V.coverage_p10_p90 <= 0.9 ? '✓' : '×') + '</span><span><b>Interval honesty</b>: the P10–P90 band covers ' + pct(V.coverage_p10_p90) + ' of walk-forward actuals against a nominal 80%.</span></div>' +
+'<div class="check-item"><span class="ok">✓</span><span><b>Term survival</b>: ' + keptCount() + ' terms kept; every dropped term is printed with its with/without held-out numbers, and the published coefficients are the refit on the survivors.</span></div>' +
 '<div class="check-item"><span class="ok">' + (stepsOk ? '✓' : '×') + '</span><span><b>Farm plans</b>: every row carries seven steps, each with a cost and a time, inside the gate\'s length bounds.</span></div>' +
 '<div class="check-item"><span class="ok">' + (D.rows.length >= 100 && D.rows.length <= 4000 ? '✓' : '×') + '</span><span><b>Board size ' + D.rows.length + '</b>: inside the 100–4,000 row bound.</span></div>' +
 '</div>' +

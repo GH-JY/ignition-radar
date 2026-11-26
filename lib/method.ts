@@ -33,19 +33,36 @@ export function methodMarkdown(radar: RadarData): string {
   lines.push('');
   lines.push('## 1. The comps curve — what the market pays for a protocol like this');
   lines.push('');
-  lines.push(`The ${c.n_tokens} tokens that already trade are the market's record. Each token is one row: every protocol instance that shares a ticker (Aave V2, V3, V4 all carry AAVE) is summed into one TVL, because the market cap belongs to the token, not to one instance. A ridge fit (lambda ${c.ridge}) with three Huber re-weighting passes predicts log market cap from log TVL, seven-day growth and sector:`);
+  lines.push(`The ${c.n_tokens} tokens that already trade are the market's record. Each token is one row: every protocol instance that shares a ticker (Aave V2, V3, V4 all carry AAVE) is summed into one TVL, because the market cap belongs to the token, not to one instance. A ridge fit (lambda ${c.ridge}) with three Huber re-weighting passes predicts log market cap from the terms that survive a held-out test:`);
   lines.push('');
   lines.push('```');
-  lines.push(`ln(mcap $) = ${f4(c.intercept)} + ${f4(c.tvl_elasticity)} * ln(TVL $) + (${f4(c.growth_weight)}) * growth + sector`);
-  lines.push(`growth = clamp(change_7d / 100, -0.5, 1.5)`);
+  const compEquation: string[] = [`ln(mcap $) = ${f4(c.intercept)}`];
+  if (c.terms.find((term) => term.key === 'size')?.kept) compEquation[0] += ` + ${f4(c.tvl_elasticity)} * ln(TVL $)`;
+  if (c.terms.find((term) => term.key === 'growth')?.kept) compEquation[0] += ` + (${f4(c.growth_weight)}) * growth`;
+  if (c.terms.find((term) => term.key === 'sector')?.kept) compEquation[0] += ` + sector`;
+  lines.push(compEquation[0]!);
+  if (c.terms.find((term) => term.key === 'growth')?.kept) lines.push(`growth = clamp(change_7d / 100, -0.5, 1.5)`);
   lines.push('```');
   lines.push('');
-  lines.push('Sector effects, in log points (a sector dummy is carried when it has at least 5 traded tokens):');
+  lines.push('Term survival: every fold re-fits the curve once with the term and once without it, on both held-out schemes. A term is dropped only when both schemes agree the curve is worse with it; a split verdict keeps it. The surviving set is refitted, so the coefficients above are the ones that earned a place:');
   lines.push('');
-  lines.push('| sector | effect | implied multiple vs baseline |');
-  lines.push('|---|---|---|');
-  for (const [name, value] of effects) lines.push(`| ${name} | ${value >= 0 ? '+' : ''}${f4(value)} | x${Math.exp(value).toFixed(2)} |`);
+  lines.push('| term | median miss, with | without | walk-forward, with | without | place |');
+  lines.push('|---|---|---|---|---|---|');
+  for (const term of c.terms) lines.push(`| ${term.label} | x${term.with_multiple} | x${term.without_multiple} | x${term.with_forward} | x${term.without_forward} | ${term.kept ? '**kept**' : 'dropped'} |`);
   lines.push('');
+  const droppedComps = c.terms.filter((term) => !term.kept).map((term) => term.label);
+  if (droppedComps.length > 0) {
+    lines.push(`Dropped: ${droppedComps.join(', ')}. ${droppedComps.includes('7-day growth') ? 'Growth does not price a launch in the market\'s own record; it enters the radar through the launch odds instead, where it predicts which peers record a token.' : ''}`.trim());
+    lines.push('');
+  }
+  if (effects.length > 0) {
+    lines.push('Sector effects, in log points (a sector dummy is carried when it has at least 5 traded tokens):');
+    lines.push('');
+    lines.push('| sector | effect | implied multiple vs baseline |');
+    lines.push('|---|---|---|');
+    for (const [name, value] of effects) lines.push(`| ${name} | ${value >= 0 ? '+' : ''}${f4(value)} | x${Math.exp(value).toFixed(2)} |`);
+    lines.push('');
+  }
   lines.push('Out-of-sample tests, each fold re-fitting the model and the flat baseline:');
   lines.push('');
   lines.push('| test | n | median miss | flat TVL multiple | improvement | Spearman |');
@@ -57,14 +74,25 @@ export function methodMarkdown(radar: RadarData): string {
   lines.push('');
   lines.push('## 2. The launch odds — the peers\' own record');
   lines.push('');
-  lines.push(`Every one of the ${o.n_peers} protocols with a listing date is a peer in a launch record: does it record a token today, and how old is it? (${o.n_tokens} of the ${o.n_peers} do.) A logistic fit of token presence on size, age and growth:`);
+  const oddsTermNames = o.terms.filter((term) => term.kept).map((term) => term.label);
+  lines.push(`Every one of the ${o.n_peers} protocols with a listing date is a peer in a launch record: does it record a token today, and how old is it? (${o.n_tokens} of the ${o.n_peers} do.) A logistic fit of token presence on the terms that survive a held-out Brier test (${oddsTermNames.join(', ')}):`);
   lines.push('');
   lines.push('```');
-  lines.push(`logit P(token today) = ${f4(o.intercept)} + ${f4(o.size_weight)} * log10(TVL $M) + ${f4(o.age_weight)} * ln(1 + age years) + (${f4(o.growth_weight)}) * growth`);
+  const oddsEquation: string[] = [`logit P(token today) = ${f4(o.intercept)}`];
+  if (o.terms.find((term) => term.key === 'size')?.kept) oddsEquation[0] += ` + ${f4(o.size_weight)} * log10(TVL $M)`;
+  if (o.terms.find((term) => term.key === 'age')?.kept) oddsEquation[0] += ` + ${f4(o.age_weight)} * ln(1 + age years)`;
+  if (o.terms.find((term) => term.key === 'growth')?.kept) oddsEquation[0] += ` + (${f4(o.growth_weight)}) * growth`;
+  lines.push(oddsEquation[0]!);
   lines.push(`odds = [P(oldest ${o.oldest_years}y) - P(age)] / [1 - P(age)], clamped to 2%..95%`);
   lines.push('```');
   lines.push('');
-  lines.push(`The horizon is the oldest dated peer in the snapshot (${o.oldest_years} years), not an arbitrary year: a five-year-old protocol is measured over its remaining plausible life. Ranking quality: AUC ${o.auc.toFixed(2)} on the peers themselves (0.5 is a coin toss). Brier score ${o.brier.toFixed(4)} against ${o.brier_base.toFixed(4)} for the base rate alone (${pct(o.n_tokens / o.n_peers)} of peers carry a token): the fit has to beat that number to be worth carrying. Calibration by age band, the fit's mean share beside the peers' observed share:`);
+  lines.push('Term survival on held-out Brier (lower is better), ten-fold and walk-forward, each fit re-run without the term:');
+  lines.push('');
+  lines.push('| term | ten-fold, with | without | walk-forward, with | without | place |');
+  lines.push('|---|---|---|---|---|---|');
+  for (const term of o.terms) lines.push(`| ${term.label} | ${term.with_brier.toFixed(4)} | ${term.without_brier.toFixed(4)} | ${term.with_forward.toFixed(4)} | ${term.without_forward.toFixed(4)} | ${term.kept ? '**kept**' : 'dropped'} |`);
+  lines.push('');
+  lines.push(`The surviving spec's held-out record is Brier ${o.held_out_brier.toFixed(4)} over ten folds and ${o.held_out_forward.toFixed(4)} walk-forward; the in-sample fit scores ${o.brier.toFixed(4)} against ${o.brier_base.toFixed(4)} for the base rate alone (${pct(o.n_tokens / o.n_peers)} of peers carry a token). The horizon is the oldest dated peer in the snapshot (${o.oldest_years} years), not an arbitrary year: a five-year-old protocol is measured over its remaining plausible life. Ranking quality: AUC ${o.auc.toFixed(2)} on the peers themselves (0.5 is a coin toss). Calibration by age band, the fit's mean share beside the peers' observed share:`);
   lines.push('');
   lines.push('| age band | peers | fitted share | observed share |');
   lines.push('|---|---|---|---|');
@@ -101,7 +129,7 @@ export function methodMarkdown(radar: RadarData): string {
   lines.push('');
   lines.push('## 6. Reproducibility');
   lines.push('');
-  lines.push('The program reads the snapshot, fits both models with plain arithmetic (Gaussian elimination, Huber IRLS, logistic IRLS), writes board.json and data.js, and copies this page. The page loads data.js and re-runs every row\'s launch value, odds, implied value, P25–P75 interval and verdict from the fitted coefficients printed here; the badge above the board reports the row count that agrees with board.json and the digest that agrees with the ledger. No row is hand-placed, no name is special-cased, and the dashboard names no network address.');
+  lines.push('The program reads the snapshot, fits both models with plain arithmetic (Gaussian elimination, Huber IRLS, logistic IRLS), gives every term a survival test on two held-out schemes, refits on the survivors, writes board.json and data.js, and copies this page. The page loads data.js and re-runs every row\'s launch value, odds, implied value, P25–P75 interval and verdict from the surviving coefficients printed here; the badge above the board reports the row count that agrees with board.json and the digest that agrees with the ledger. No row is hand-placed, no name is special-cased, and the dashboard names no network address.');
   lines.push('');
   return `${lines.join('\n')}\n`;
 }
