@@ -176,6 +176,10 @@ td.perhour.neg { color: var(--dim); }
 .d-card { margin-top: 16px; padding: 15px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
 .d-card h3 { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
 .d-card h3 b { color: var(--muted); font-weight: 500; letter-spacing: 0; text-transform: none; float: right; }
+.d-cols { display: block; }
+.d-col { min-width: 0; }
+.s-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 5px; }
+.s-chip { font-size: 10px; padding: 1px 6px; border: 1px solid rgba(255, 122, 51, 0.3); border-radius: 5px; color: #ffb98c; font-variant-numeric: tabular-nums; }
 .eq { margin-top: 10px; padding: 10px 12px; border-left: 2px solid rgba(255, 122, 51, 0.55); background: #0a0e15; border-radius: 0 7px 7px 0; font-family: var(--mono); font-size: 11px; line-height: 1.7; color: #c2cad8; overflow-x: auto; }
 .eq b { color: var(--orange); font-weight: 500; }
 .eq .mut { color: var(--dim); }
@@ -263,6 +267,13 @@ td.perhour.neg { color: var(--dim); }
 .mini td.neg { color: #8a93a3; }
 .mini .mut { color: var(--dim); font-size: 10px; }
 .mini tr.now td { background: rgba(255, 122, 51, 0.06); }
+.d-card .mini th { white-space: normal; }
+.d-card .mini td:first-child { white-space: normal; }
+
+@media (min-width: 1200px) {
+.drawer { width: min(1010px, calc(100vw - 280px)); }
+.d-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 18px; align-items: start; }
+}
 
 @media (max-width: 1280px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .table-wrap { max-height: none; }

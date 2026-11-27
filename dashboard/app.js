@@ -14,6 +14,7 @@ return;
 }
 
 var C = D.comps, O = D.odds, E = D.economics, V = C.validation, COV = D.coverage;
+var REFIT = window.REFIT || null;
 var $ = function (sel, root) { return (root || document).querySelector(sel); };
 var ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) { return ESC[ch]; }); }
@@ -51,6 +52,17 @@ return term === null || term.kept;
 function keptCount() {
 var all = (C.terms || []).concat(O.terms || []);
 return all.filter(function (term) { return term.kept; }).length + '/' + all.length;
+}
+/* The two fits, re-run in this browser by 02-refit.js from the training rows in data.js. */
+function refitOk() { return !!(REFIT && REFIT.ok); }
+function refitDeltaText(n) {
+if (n == null || !isFinite(n)) return '—';
+if (n === 0) return '0 (bit-identical)';
+return n.toExponential(1);
+}
+function refitSentence() {
+if (!refitOk()) return 'The training rows in data.js ' + (REFIT && REFIT.note ? REFIT.note : 'are missing') + ', so the fits could not be re-run here.';
+return 'Both fits are re-run in this browser from the training rows in data.js — comps <b>' + REFIT.comps.n + '</b> tokens, launch record <b>' + REFIT.odds.n + '</b> peers, <b>' + REFIT.coefficients + '</b> coefficients re-derived — and the largest difference from the published coefficients is <b>' + refitDeltaText(REFIT.max_delta) + '</b>. No network request is made.';
 }
 function termWords(model, words) {
 var phrases = (model.terms || []).filter(function (term) { return term.kept; }).map(function (term) { return words[term.key]; }).filter(function (word) { return !!word; });
@@ -178,14 +190,14 @@ $('#snapSource').textContent = D.source.replace(/, fetched (\S+?)T[\d:.]+Z$/, ' 
 $('#snapFloor').textContent = 'Floor ' + full(D.floor_usd);
 $('#footDate').textContent = D.as_of;
 $('#footModel').textContent = D.model_version;
-$('#modelTag').textContent = D.model_version + ' · fitted from ' + COV.protocols + ' protocols';
+$('#modelTag').textContent = D.model_version + ' · fitted from ' + COV.protocols + ' protocols · refit in this browser';
 $('#nBoard').textContent = D.rows.length;
 $('#nLive').textContent = D.live.length;
 
 var badge = $('#checkBadge');
-var allOk = agreed === D.rows.length && digestOk && D.accounting.matches && boardSorted;
+var allOk = agreed === D.rows.length && digestOk && D.accounting.matches && boardSorted && refitOk();
 badge.className = 'check ' + (allOk ? 'ok' : 'bad');
-badge.innerHTML = '<span class="dot"></span><p><b>' + agreed + ' / ' + D.rows.length + ' rows recompute</b> and agree with the board: launch value, eventual odds, implied value, P25–P75 and verdict. Board digest <b>' + D.accounting.digest + '</b> ' + (digestOk ? 're-derives from these rows' : 'does NOT re-derive') + '; the ledger sums to <b>' + D.accounting.total + '</b> (' + (D.accounting.matches ? 'equal to the snapshot' : 'NOT equal') + '), and ranks run <b>1–' + D.rows.length + '</b> with implied value ' + (boardSorted ? 'never rising' : 'RISING somewhere') + '.</p>';
+badge.innerHTML = '<span class="dot"></span><p><b>' + agreed + ' / ' + D.rows.length + ' rows recompute</b> and agree with the board: launch value, eventual odds, implied value, P25–P75 and verdict. Board digest <b>' + D.accounting.digest + '</b> ' + (digestOk ? 're-derives from these rows' : 'does NOT re-derive') + '; the ledger sums to <b>' + D.accounting.total + '</b> (' + (D.accounting.matches ? 'equal to the snapshot' : 'NOT equal') + '), and ranks run <b>1–' + D.rows.length + '</b> with implied value ' + (boardSorted ? 'never rising' : 'RISING somewhere') + '. ' + refitSentence() + '</p>';
 
 function stat(label, value) {
 return '<div class="head-stat"><span>' + label + '</span><strong>' + value + '</strong></div>';
@@ -262,7 +274,7 @@ sub: 'The comps curve is fitted on every token that records a market cap; these 
 method: {
 eyebrow: 'Method',
 title: 'The fitted model, its held-out tests and the ledger',
-sub: 'Both models are estimated inside the program from the sealed snapshot: a comps curve for launch value with a measured interval, a logistic record of who launches, and a per-row pro-rata arithmetic for the farm verdict. Every snapshot protocol is accounted for, and the board carries a digest the page re-derives.'
+sub: 'Both models are estimated inside the program from the sealed snapshot: a comps curve for launch value with a measured interval, a logistic record of who launches, and a per-row pro-rata arithmetic for the farm verdict. Both fits are re-estimated in this browser from the training rows the page carries, and the refit is compared with the published coefficients. Every snapshot protocol is accounted for, and the board carries a digest the page re-derives.'
 }
 };
 
@@ -363,8 +375,17 @@ else th.removeAttribute('aria-sort');
 
 /* ---------------------------------------------------------------- detail drawer */
 
+/* A step's sentence, with its cost and time lifted into scannable chips. */
 function stepHtml(text) {
-return esc(text).replace(/Cost: ([^.]*)\./g, 'Cost: <span class="cost">$1</span>.');
+var cost = null, time = null;
+var body = esc(text)
+.replace(/Cost: ([^.]*)\.\s*/g, function (match, value) { cost = value; return ''; })
+.replace(/Time: ([^.]*)\.\s*/g, function (match, value) { time = value; return ''; })
+.replace(/\s+/g, ' ')
+.replace(/ $/, '');
+if (!/[.!?]$/.test(body)) body += '.';
+var meta = (cost !== null ? '<span class="s-chip">Cost: ' + cost + '</span>' : '') + (time !== null ? '<span class="s-chip">Time: ' + time + '</span>' : '');
+return '<p>' + body + '</p>' + (meta ? '<div class="s-meta">' + meta + '</div>' : '');
 }
 
 /* The scenario in a grid: every deposit row against every drop column at this row's own figures. */
@@ -470,6 +491,7 @@ var html = '<div class="d-head"><div>' +
 '<div class="d-cell"><span>Odds, eventual</span><strong>' + pct(m.odds) + '</strong></div>' +
 '</div>' +
 
+'<div class="d-cols"><div class="d-col">' +
 '<div class="d-card"><h3>Farm arithmetic <span class="vchip ' + e.verdict + '" style="float:right">' + e.verdict + '</span></h3>' +
 '<div class="eq">expected drop = ' + full(scenario.deposit) + ' × ' + pct(scenario.drop) + ' × ' + e.ratio.toFixed(4) + ' implied / TVL<br>' +
 'gas (' + esc(e.tier.chain) + ') = $' + e.tier.setup_usd + ' + $' + e.tier.weekly_usd + ' × ' + e.weeks + ' wk = ' + full(e.gas) + '<br>' +
@@ -493,6 +515,7 @@ riskGrid(row, m.implied) +
 weeksTable(row, m.implied) +
 '<p class="d-note">The hold is a choice, not a fact: a longer hold costs more gas and carry but spans more snapshots. The board uses ' + e.weeks + ' weeks for a protocol of this age.</p></div>' +
 
+'</div><div class="d-col">' +
 '<div class="d-card"><h3>' + row.farm_steps.length + ' steps <b>each with a cost and a time</b></h3><ol class="steps">' +
 row.farm_steps.map(function (step) { return '<li><p>' + stepHtml(step) + '</p></li>'; }).join('') +
 '</ol></div>' +
@@ -526,6 +549,7 @@ var dropped = droppedWords(O, { size: 'size', age: 'age', growth: '7-day growth'
 return dropped ? 'Dropped by the term-survival test: ' + dropped + '.' : 'All three terms survived the held-out test.';
 })() + '</p></div>' +
 
+'</div></div>' +
 '<p class="d-note">This drawer recomputes the row from the fitted coefficients: launch value ' + money(m.launch) + ', odds ' + pct(m.odds) + ', implied ' + full(m.implied) + ' inside ' + full(m.range.low) + '–' + full(m.range.high) + '. The board carries ' + full(row.implied_value_usd) + ' with ' + full(row.implied_low_usd) + '–' + full(row.implied_high_usd) + '; ' + (auditBySlug[row.slug].ok ? 'the two agree.' : 'they differ.') + ' The farm figures here are re-run at the board\'s scenario (' + full(scenario.deposit) + ' × ' + pct(scenario.drop) + ') and re-derive from the same arithmetic as the row.</p>';
 
 $('#drawerBody').innerHTML = html;
@@ -707,6 +731,7 @@ return '<div class="m-hero"><h3>One snapshot in, a ranked field of launches out<
 '<span class="m-pill">comps <b>' + C.n_tokens + '</b> tokens · held-out ×' + V.loo_error_multiple + '</span>' +
 '<span class="m-pill">launch record <b>' + O.n_peers + '</b> peers · AUC ' + O.auc.toFixed(2) + '</span>' +
 '<span class="m-pill">terms that survived <b>' + keptCount() + '</b></span>' +
+'<span class="m-pill">refit in browser <b>' + (refitOk() ? refitDeltaText(REFIT.max_delta) + ' max Δ' : 'n/a') + '</b></span>' +
 '<span class="m-pill">scenario <b>' + full(E.deposit_usd) + ' × ' + pct(E.drop_share) + '</b></span>' +
 '<span class="m-pill">ledger <b>' + D.accounting.total + '</b> protocols · digest ' + D.accounting.digest + '</span>' +
 '<span class="m-pill">board <b>' + COV.scored + '</b> candidates · watchlist ' + COV.watchlist_covered + '/' + COV.watchlist + '</span>' +
@@ -747,6 +772,7 @@ economicsHtml() + '</div>' +
 '<div class="check-item"><span class="ok">' + (COV.watchlist_covered === COV.watchlist ? '✓' : '×') + '</span><span><b>Watchlist ' + COV.watchlist_covered + ' / ' + COV.watchlist + '</b>: every listed slug is scored on the board.</span></div>' +
 '<div class="check-item"><span class="ok">' + (D.accounting.matches ? '✓' : '×') + '</span><span><b>Ledger ' + D.accounting.total + ' / ' + COV.protocols + '</b>: every snapshot protocol is in exactly one accounting group, and the groups sum to the total.</span></div>' +
 '<div class="check-item"><span class="ok">' + (digestOk ? '✓' : '×') + '</span><span><b>Board digest ' + D.accounting.digest + '</b>: re-derived in this page from rank|slug|implied on every row and compared with the ledger\'s copy.</span></div>' +
+'<div class="check-item"><span class="ok">' + (refitOk() ? '✓' : '×') + '</span><span><b>Refit in this browser</b>: ' + (refitOk() ? REFIT.coefficients + ' coefficients re-estimated from the ' + REFIT.comps.n + ' comps rows and ' + REFIT.odds.n + ' peers in data.js, with a largest difference of ' + refitDeltaText(REFIT.max_delta) + ' from the published ones.' : 'the training rows could not be re-fitted.') + '</span></div>' +
 '<div class="check-item"><span class="ok">' + (V.coverage_p10_p90 >= 0.7 && V.coverage_p10_p90 <= 0.9 ? '✓' : '×') + '</span><span><b>Interval honesty</b>: the P10–P90 band covers ' + pct(V.coverage_p10_p90) + ' of walk-forward actuals against a nominal 80%.</span></div>' +
 '<div class="check-item"><span class="ok">✓</span><span><b>Term survival</b>: ' + keptCount() + ' terms kept; every dropped term is printed with its with/without held-out numbers, and the published coefficients are the refit on the survivors.</span></div>' +
 '<div class="check-item"><span class="ok">' + (stepsOk ? '✓' : '×') + '</span><span><b>Farm plans</b>: every row carries ' + planSteps + ' steps, each with a cost and a time, inside the gate\'s length bounds.</span></div>' +

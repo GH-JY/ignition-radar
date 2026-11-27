@@ -231,6 +231,25 @@ export interface Economics {
   age_default_years: number;
 }
 
+/**
+ * The training rows both fits were estimated on, embedded so the dashboard can re-fit the
+ * models itself from the same numbers. Short keys keep data.js compact: comps rows carry
+ * t = TVL, m = market cap, g = the growth term and c = the sorted category index (-1 when the
+ * row carries no dummy); odds rows carry t = TVL floored at $1M, a = age in years floored at
+ * 0.05, g = the growth term and y = 1 when the peer records a token.
+ */
+export interface FitPayload {
+  comps: {
+    terms: { size: boolean; growth: boolean; sector: boolean };
+    categories: string[];
+    rows: { t: number; m: number; g: number; c: number }[];
+  };
+  odds: {
+    terms: { size: boolean; age: boolean; growth: boolean };
+    rows: { t: number; a: number; g: number; y: number }[];
+  };
+}
+
 /** Everything the page renders, as one script. */
 export interface RadarData {
   as_of: string;
@@ -269,6 +288,8 @@ export interface RadarData {
   stats: { median_implied: number; top_implied: number; median_odds: number };
   rows: BoardRow[];
   live: LiveRow[];
+  /** The same rows the two fits trained on: the page re-estimates both models from them. */
+  fit: FitPayload;
 }
 
 export class SnapshotError extends Error {
@@ -1274,6 +1295,21 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const oddsFit = fitLaunchOdds(snapshot);
   const board = buildBoard(snapshot, comps, oddsFit.model, validation);
   const live = liveRows(snapshot);
+  // The page re-fits both models from these rows: recomputing them here is deterministic and
+  // costs nothing, and it keeps the payload identical to what the fits actually consumed.
+  const fitCompsRows = compRows(snapshot);
+  const fitCategories = categoryTerms(fitCompsRows);
+  const fitCompsTerms = {
+    size: comps.terms.find((term) => term.key === 'size')!.kept,
+    growth: comps.terms.find((term) => term.key === 'growth')!.kept,
+    sector: comps.terms.find((term) => term.key === 'sector')!.kept,
+  };
+  const fitOddsRows = oddsRows(snapshot);
+  const fitOddsTerms = {
+    size: oddsFit.model.terms.find((term) => term.key === 'size')!.kept,
+    age: oddsFit.model.terms.find((term) => term.key === 'age')!.kept,
+    growth: oddsFit.model.terms.find((term) => term.key === 'growth')!.kept,
+  };
   const trading = snapshot.protocols.filter((protocol) => hasToken(protocol)).length;
   const tradingWithMcap = snapshot.protocols.filter((protocol) => hasToken(protocol) && protocol.mcap_usd !== null).length;
   const tokenlessByDesign = snapshot.protocols.filter((protocol) => !hasToken(protocol) && !isCandidate(protocol)).length;
@@ -1321,6 +1357,22 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     },
     rows: board,
     live,
+    fit: {
+      comps: {
+        terms: fitCompsTerms,
+        categories: fitCategories,
+        rows: fitCompsRows.map((row) => ({
+          t: row.tvl_usd,
+          m: row.mcap_usd,
+          g: growthTerm(row.change_7d),
+          c: row.category === null ? -1 : fitCategories.indexOf(row.category),
+        })),
+      },
+      odds: {
+        terms: fitOddsTerms,
+        rows: fitOddsRows.map((row) => ({ t: row.tvl_usd, a: row.age_years, g: row.growth, y: row.has_token ? 1 : 0 })),
+      },
+    },
   };
   return { board, radar };
 }

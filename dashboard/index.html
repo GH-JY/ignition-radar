@@ -32,7 +32,7 @@
 
 <div class="rail-foot">
 <div class="check" id="checkBadge"><span class="dot"></span><p>Checking the board…</p></div>
-<p class="note">Every figure is fitted from the sealed snapshot. The page re-runs the arithmetic on every row and compares it with the board it was handed.</p>
+<p class="note">Every figure is fitted from the sealed snapshot. The page re-fits both models in this browser from the training rows it carries, re-runs the arithmetic on every row and compares the result with the board it was handed. No network request is made.</p>
 <p class="note dim" id="modelTag"></p>
 </div>
 </aside>
@@ -120,7 +120,7 @@
 </section>
 
 <footer class="colophon">
-<p>Ignition · <span id="footModel">ignition-4</span> · snapshot <span id="footDate">—</span> · no network, no hand-set multiples</p>
+<p>Ignition · <span id="footModel">ignition-4</span> · snapshot <span id="footDate">—</span> · refit in this browser · no network · no hand-set multiples</p>
 <p class="muted">The board is an estimate of expected launch value under the fitted comps and odds; it is not investment advice.</p>
 </footer>
 </main>
@@ -132,6 +132,7 @@
 </aside>
 
 <script src="../data.js"></script>
+<script src="02-refit.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
