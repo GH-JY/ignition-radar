@@ -16,17 +16,19 @@
 //  2. THE LAUNCH ODDS (fitLaunchOdds). Every protocol whose listing date is known is a peer in
 //     a launch record: does it record a token today, and how old is it? A logistic fit of token
 //     presence on size, age and seven-day growth recovers the share of peers at each age that
-//     carry a token (AUC about 0.71). Differencing that fitted share over one year gives the
-//     radar's twelve-month launch odds for a protocol that has none yet: P(list by age+1)
-//     minus P(list by age), over the chances it is still tokenless.
+//     carry a token (AUC about 0.71). Differencing that fitted share from the protocol's age to
+//     the oldest dated peer's age gives the radar's eventual launch odds for a protocol that has
+//     none yet: P(list by the oldest peer's age) minus P(list by age), over the chances it is
+//     still tokenless.
 //
-//  3. THE BOARD (buildRadar). implied value = fitted launch value x twelve-month launch odds.
+//  3. THE BOARD (buildRadar). implied value = fitted launch value x eventual launch odds.
 //     The board carries every pre-token protocol that can plausibly launch (the watchlist plus
 //     the field below the floor, with exchanges, wrapped and staked products and versioned pools
 //     set aside), every watchlist slug among them, and a farm plan per row whose economics are
-//     computed from the row's own implied value and costs: expected airdrop (0.001% of FDV to
-//     one wallet), gas, the opportunity cost of the capital and the hours the plan takes. The
-//     verdict follows from the net dollars and dollars per hour, never from a name.
+//     computed from the row's own implied value and costs: an expected drop of a stated share of
+//     FDV spread pro rata across TVL on a fixed $10,000 deposit, chain-priced gas, the carrying
+//     cost of the capital and the hours the plan takes. The verdict follows from the net dollars
+//     and dollars per hour against a T-bill benchmark, never from a name.
 //
 // The page beside this file re-runs all of it, row by row, from the snapshot figures it prints,
 // and shows that every number agrees with the board.
@@ -207,13 +209,18 @@ export interface Validation {
 
 /** The plan's economics, published so the page re-runs the same arithmetic as the board. */
 export interface Economics {
-  wallet_share: number;
+  /** The plan's position: one wallet, one deposit, the same figure for every row. */
+  deposit_usd: number;
+  /** The share of FDV a launch is assumed to drop to its users (the scenario default). */
+  drop_share: number;
+  /** Carrying cost of the deposit: custody and stablecoin-borrow risk, 2% a year. */
+  capital_rate: number;
+  /** The risk-free benchmark the drop has to beat: 4% a year in T-bills. */
+  tbill_rate: number;
   setup_hours: number;
   weekly_hours: number;
-  gas_base_usd: number;
-  gas_weekly_usd: number;
-  opportunity_rate: number;
-  capital_tiers: { tvl_min_usd: number; capital_usd: number }[];
+  /** Gas by settlement chain; a row uses the first tier one of its chains matches. */
+  gas_tiers: { chain: string; setup_usd: number; weekly_usd: number }[];
   hold_tiers: { younger_than_days: number; weeks: number }[];
   hold_base_weeks: number;
   hold_unknown_weeks: number;
@@ -273,8 +280,11 @@ export class SnapshotError extends Error {
 
 export const MODEL_VERSION = 'ignition-4';
 
-/** The share of a launched token's FDV one farming wallet is assumed to capture (0.001%). */
-export const WALLET_SHARE = 0.00001;
+/** One wallet's position: the same $10,000 deposit in every row, so rows compare like with like. */
+export const PLAN_DEPOSIT_USD = 10_000;
+
+/** The launch's assumed drop share: 7% of FDV reaches users, split pro rata to TVL. */
+export const DROP_SHARE = 0.07;
 
 const DAYS_PER_YEAR = 365;
 const RIDGE = 2.0;
@@ -285,32 +295,32 @@ const VERDICT_THIN_NET = 30;
 const VERDICT_THIN_PER_HOUR = 1.5;
 
 /**
- * The farm plan's costs and tiers, published to the page. The verdict is a statement about
- * dollars per hour under these explicit assumptions, not a promise: one wallet captures
- * 0.001% of FDV, gas is $12 up front and $3 a week, the capital could earn 4% a year elsewhere,
- * and the plan takes 2 hours to set up plus 0.75 hours a week.
+ * The farm plan's economics, published to the page. The verdict is a statement about dollars
+ * per hour under these explicit assumptions, not a promise: one wallet places $10,000, a launch
+ * drops 7% of FDV pro rata to TVL, gas is priced by settlement chain, the deposit carries a
+ * 2%/year cost, T-bills pay 4%/year as the benchmark, and the plan takes 2 hours to set up plus
+ * 0.75 hours a week. The drop's size is a scenario, not a forecast: the page exposes both the
+ * deposit and the drop share, and the detail view prints the break-even drop share per row.
  */
 export const ECONOMICS: Economics = {
-  wallet_share: WALLET_SHARE,
+  deposit_usd: PLAN_DEPOSIT_USD,
+  drop_share: DROP_SHARE,
+  capital_rate: 0.02,
+  tbill_rate: 0.04,
   setup_hours: 2,
   weekly_hours: 0.75,
-  gas_base_usd: 12,
-  gas_weekly_usd: 3,
-  opportunity_rate: 0.04,
-  capital_tiers: [
-    { tvl_min_usd: 5_000_000_000, capital_usd: 250 },
-    { tvl_min_usd: 1_000_000_000, capital_usd: 200 },
-    { tvl_min_usd: 250_000_000, capital_usd: 150 },
-    { tvl_min_usd: 100_000_000, capital_usd: 100 },
-    { tvl_min_usd: 0, capital_usd: 50 },
+  gas_tiers: [
+    { chain: 'Ethereum', setup_usd: 18, weekly_usd: 2.5 },
+    { chain: 'Solana', setup_usd: 2, weekly_usd: 0.2 },
+    { chain: 'other', setup_usd: 6, weekly_usd: 0.6 },
   ],
   hold_tiers: [
-    { younger_than_days: 365, weeks: 8 },
-    { younger_than_days: 730, weeks: 6 },
-    { younger_than_days: 1095, weeks: 5 },
+    { younger_than_days: 365, weeks: 12 },
+    { younger_than_days: 730, weeks: 10 },
+    { younger_than_days: 1095, weeks: 8 },
   ],
-  hold_base_weeks: 4,
-  hold_unknown_weeks: 6,
+  hold_base_weeks: 6,
+  hold_unknown_weeks: 10,
   farm_net_usd: VERDICT_FARM_NET,
   farm_per_hour_usd: VERDICT_FARM_PER_HOUR,
   thin_net_usd: VERDICT_THIN_NET,
@@ -938,10 +948,12 @@ function chainOf(protocol: SnapshotProtocol): string {
   return protocol.chains.length > 0 ? protocol.chains[0]! : 'its main chain';
 }
 
-/** The capital one farm position takes, from the protocol's TVL tier. */
-function capitalFor(tvl_usd: number): number {
-  for (const tier of ECONOMICS.capital_tiers) if (tvl_usd >= tier.tvl_min_usd) return tier.capital_usd;
-  return ECONOMICS.capital_tiers[ECONOMICS.capital_tiers.length - 1]!.capital_usd;
+/** Gas for the chain the plan settles on: Ethereum, Solana, or an L2/other chain. */
+function gasTierFor(protocol: SnapshotProtocol): { chain: string; setup_usd: number; weekly_usd: number } {
+  const names = protocol.chains.map((chain) => chain.toLowerCase());
+  if (names.includes('ethereum')) return ECONOMICS.gas_tiers[0]!;
+  if (names.includes('solana')) return ECONOMICS.gas_tiers[1]!;
+  return ECONOMICS.gas_tiers[2]!;
 }
 
 /** How many weeks to hold, from tenure: a young protocol needs a longer qualifying window. */
@@ -1005,36 +1017,36 @@ function secondaryAction(protocol: SnapshotProtocol, category: string): { text: 
     return { text: `Borrow up to a quarter of the deposit in ${name}'s own stablecoin and hold it in the same wallet.`, cost: 'about $5 of gas' };
   }
   if (c.includes('dex')) {
-    return { text: `Add a second position of $50 to ${name}'s largest pool, or stake the LP receipt where the protocol allows it.`, cost: 'about $5 of gas and $50 of extra capital' };
+    return { text: `Add a second position of $500 to ${name}'s largest pool, or stake the LP receipt where the protocol allows it.`, cost: 'about $5 of gas and $500 of extra capital' };
   }
   if (c.includes('bridge')) {
     return { text: `Bridge a small $20 test amount back across ${name} once, so the wallet shows two-way use.`, cost: 'about $4 of gas' };
   }
   if (c.includes('stak') || c.includes('restak')) {
-    return { text: `If a lending market accepts ${name}'s staked receipt, supply $50 of it as collateral there.`, cost: 'about $5 of gas and $50 of receipt' };
+    return { text: `If a lending market accepts ${name}'s staked receipt, supply $500 of it as collateral there.`, cost: 'about $5 of gas and $500 of receipt' };
   }
   if (c.includes('deriv') || c.includes('perp') || c.includes('option')) {
-    return { text: `Open a $50 hedge against the deposit for one week and close it before the hold ends.`, cost: 'about $4 of gas and $50 of margin' };
+    return { text: `Open a $500 hedge against the deposit for one week and close it before the hold ends.`, cost: 'about $4 of gas and $500 of margin' };
   }
   if (c.includes('predict')) {
-    return { text: `Trade a second market on ${name} and hold both positions for at least a week.`, cost: 'about $2 of gas and $50 of position' };
+    return { text: `Trade a second market on ${name} and hold both positions for at least a week.`, cost: 'about $2 of gas and $500 of position' };
   }
   if (c.includes('curator') || c.includes('allocator')) {
-    return { text: `Deposit $50 into a second vault from the same ${name} curator and compare its stated fee.`, cost: 'about $4 of gas and $50 of extra capital' };
+    return { text: `Deposit $500 into a second vault from the same ${name} curator and compare its stated fee.`, cost: 'about $4 of gas and $500 of extra capital' };
   }
   if (c.includes('rwa')) {
-    return { text: `Move $50 of the asset to a second chain ${name} supports and hold it there for a week.`, cost: 'about $6 of gas and $50 of asset' };
+    return { text: `Move $500 of the asset to a second chain ${name} supports and hold it there for a week.`, cost: 'about $6 of gas and $500 of asset' };
   }
   if (c.includes('insurance')) {
-    return { text: `Add $20 of cover on a second protocol ${name} insures and keep both policies.`, cost: 'about $3 of gas and $20 of cover' };
+    return { text: `Add $200 of cover on a second protocol ${name} insures and keep both policies.`, cost: 'about $3 of gas and $200 of cover' };
   }
   if (c.includes('chain')) {
-    return { text: `Make one $50 swap on ${name}'s largest native DEX so the wallet uses more than the bridge.`, cost: 'about $2 of gas and $50 of swap' };
+    return { text: `Make one $500 swap on ${name}'s largest native DEX so the wallet uses more than the bridge.`, cost: 'about $2 of gas and $500 of swap' };
   }
   if (c.includes('yield')) {
-    return { text: `Deposit $50 into a second ${name} vault with a different strategy and keep both receipts.`, cost: 'about $4 of gas and $50 of extra capital' };
+    return { text: `Deposit $500 into a second ${name} vault with a different strategy and keep both receipts.`, cost: 'about $4 of gas and $500 of extra capital' };
   }
-  return { text: `Make a second $50 deposit into another ${name} pool and keep both positions open.`, cost: 'about $4 of gas and $50 of extra capital' };
+  return { text: `Make a second $500 deposit into another ${name} pool and keep both positions open.`, cost: 'about $4 of gas and $500 of extra capital' };
 }
 
 /** A step string: its action, its cost and its time, always inside the gate's 20..600 characters. */
@@ -1045,10 +1057,11 @@ export function stepText(action: string, cost: string, time: string): string {
   return text;
 }
 
-/** The protocol's farm plan: seven concrete steps with a cost and a time each, from its own record. */
+/** The protocol's farm plan: nine concrete steps with a cost and a time each, from its own record. */
 export function farmPlan(protocol: SnapshotProtocol, age: number | null): string[] {
   const chain = chainOf(protocol);
-  const capital = capitalFor(protocol.tvl_usd);
+  const capital = ECONOMICS.deposit_usd;
+  const deposit = capital.toLocaleString('en-US');
   const hold = holdWeeksFor(age);
   const holdDays = hold * 7;
   const category = protocol.category ?? '';
@@ -1057,11 +1070,11 @@ export function farmPlan(protocol: SnapshotProtocol, age: number | null): string
   const exitFloor = Math.round(protocol.tvl_usd * 0.75).toLocaleString('en-US');
   return [
     stepText(
-      'Create a fresh wallet for this position and keep its seed phrase offline; fund it a little beyond the deposit so gas never blocks an exit.',
+      'Create a fresh wallet for this position and keep its seed phrase offline; fund it with the deposit plus a small gas buffer so the exit is never blocked.',
       'about $3 of gas to fund the wallet',
       '10 minutes',
     ),
-    stepText(primary.text, `$${capital} of capital and about $${primary.gas} of gas`, '15 minutes to set up'),
+    stepText(primary.text, `$${deposit} of capital and about $${primary.gas} of gas`, '15 minutes to set up'),
     stepText(secondary.text, secondary.cost, '15 minutes'),
     stepText(
       `Once a week, make one qualifying action on ${protocol.name} (a deposit, a borrow, a swap or a vote) and keep the receipts.`,
@@ -1070,12 +1083,17 @@ export function farmPlan(protocol: SnapshotProtocol, age: number | null): string
     ),
     stepText(
       `Keep the position open for at least ${holdDays} days so it spans several snapshots and the protocol's record can price it.`,
-      `the $${capital} stays in the position`,
+      `the $${deposit} stays in the position`,
       `${holdDays} days`,
     ),
     stepText(
-      `Check ${protocol.name}'s own site for a points or rewards page, claim only from the link it publishes, and write the wallet, dates and transactions in a farm log.`,
-      'no fee to check, and never pay to claim',
+      `Write the arithmetic in a log before funding: deposit $${deposit}, implied value, the 7% drop share, this row's break-even drop share and the T-bill return on the same money for ${hold} weeks.`,
+      'free',
+      '10 minutes',
+    ),
+    stepText(
+      `Check ${protocol.name}'s own site for a points or rewards page, claim only from the link it publishes, and never pay to claim.`,
+      'no fee to check, and no fee to claim',
       '15 minutes at the end',
     ),
     stepText(
@@ -1083,10 +1101,15 @@ export function farmPlan(protocol: SnapshotProtocol, age: number | null): string
       'no fee; the exit is a rule, not a trade',
       '10 minutes before you start',
     ),
+    stepText(
+      'At each weekly check, stop adding capital if the protocol\'s TVL halves or its implied value falls below the P25 band\'s low; the drop is priced off both.',
+      'free; the stop is a rule',
+      '2 minutes a week',
+    ),
   ];
 }
 
-/** The plan's economics from the row's own figures: expected airdrop, costs, hours and verdict. */
+/** The plan's economics from the row's own figures: expected drop, costs, hours and verdict. */
 export function farmEconomics(protocol: SnapshotProtocol, impliedValue: number, age: number | null): {
   expected_airdrop_usd: number;
   farm_hours: number;
@@ -1097,11 +1120,11 @@ export function farmEconomics(protocol: SnapshotProtocol, impliedValue: number, 
 } {
   const weeks = holdWeeksFor(age);
   const hours = ECONOMICS.setup_hours + ECONOMICS.weekly_hours * weeks;
-  const capital = capitalFor(protocol.tvl_usd);
-  const gas = ECONOMICS.gas_base_usd + ECONOMICS.gas_weekly_usd * weeks;
-  const opportunity = capital * ECONOMICS.opportunity_rate * (weeks / 52);
-  const expected = impliedValue * WALLET_SHARE;
-  const net = expected - gas - opportunity;
+  const gasTier = gasTierFor(protocol);
+  const gas = gasTier.setup_usd + gasTier.weekly_usd * weeks;
+  const carry = ECONOMICS.deposit_usd * ECONOMICS.capital_rate * (weeks / 52);
+  const expected = ECONOMICS.deposit_usd * ECONOMICS.drop_share * (impliedValue / Math.max(1, protocol.tvl_usd));
+  const net = expected - gas - carry;
   const perHour = net / hours;
   const verdict =
     net >= ECONOMICS.farm_net_usd && perHour >= ECONOMICS.farm_per_hour_usd
@@ -1112,7 +1135,7 @@ export function farmEconomics(protocol: SnapshotProtocol, impliedValue: number, 
   return {
     expected_airdrop_usd: round(expected),
     farm_hours: round1(hours),
-    farm_cost_usd: round(gas + opportunity),
+    farm_cost_usd: round(gas + carry),
     net_usd: round(net),
     per_hour_usd: round1(perHour),
     verdict,

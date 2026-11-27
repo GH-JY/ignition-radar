@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/token-radar-01/GH-JY/ignition-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 [![reward](https://make.fun/badge/token-radar-01/GH-JY/ignition-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
-Ignition is a token launch radar for DefiLlama's sealed snapshot: one fitted model scores every pre-token protocol, the watchlist and the field below it, ranks the board by implied value, keeps the protocols that already record a token in a separate view, and gives every row a seven-step farm plan with a cost and a time.
+Ignition is a token launch radar for DefiLlama's sealed snapshot: one fitted model scores every pre-token protocol, the watchlist and the field below it, ranks the board by implied value, keeps the protocols that already record a token in a separate view, and gives every row a pro-rata farm plan at a stated deposit and drop share: net dollars, dollars per hour, break-even drop share, and nine costed steps including the exit and stop rules. The dashboard's scenario controls re-run every row at any deposit from $1,000 to $100,000 and any drop share from 1% to 15%.
 
 ## Run it
 

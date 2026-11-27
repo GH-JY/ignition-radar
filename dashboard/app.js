@@ -1,8 +1,9 @@
 /* Ignition — the page re-runs the model on every row it shows.
 The board it was handed (../data.js) carries the fitted coefficients, the residual quantiles,
 the plan's economics and the ranked rows. Nothing here is fetched: the page recomputes launch
-value, eventual odds, implied value, its P25–P75 band and the verdict from those coefficients,
-re-derives the board digest, and reports how many rows agree with board.json. */
+value, eventual odds, implied value, its P25–P75 band and the farm verdict from those
+coefficients, re-derives the board digest, and reports how many rows agree with board.json.
+The scenario controls re-run the farm arithmetic — deposit and drop share — on every row. */
 (function () {
 'use strict';
 
@@ -26,6 +27,7 @@ if (a >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
 return '$' + Math.round(n);
 }
 function full(n) { return '$' + Math.round(n).toLocaleString('en-US'); }
+function signedMoney(n) { return (n >= 0 ? '+' : '−') + full(Math.abs(n)); }
 function pct(n) { return (n * 100).toFixed(1) + '%'; }
 function signedPct(n) { return (n >= 0 ? '+' : '−') + Math.abs(n).toFixed(1) + '%'; }
 function sign(n) { return n >= 0 ? '+' : '−'; }
@@ -55,6 +57,9 @@ var phrases = (model.terms || []).filter(function (term) { return term.kept; }).
 if (phrases.length <= 1) return phrases.join('');
 return phrases.slice(0, -1).join(', ') + ' and ' + phrases[phrases.length - 1];
 }
+function droppedWords(model, words) {
+return (model.terms || []).filter(function (term) { return !term.kept; }).map(function (term) { return words[term.key] || term.label; }).join(', ');
+}
 
 /* ---------------------------------------------------------------- the model, re-run in the page */
 
@@ -83,22 +88,30 @@ if (age == null) return E.hold_unknown_weeks;
 for (var i = 0; i < E.hold_tiers.length; i += 1) if (age < E.hold_tiers[i].younger_than_days) return E.hold_tiers[i].weeks;
 return E.hold_base_weeks;
 }
-function capitalOf(tvl) {
-for (var i = 0; i < E.capital_tiers.length; i += 1) if (tvl >= E.capital_tiers[i].tvl_min_usd) return E.capital_tiers[i].capital_usd;
-return E.capital_tiers[E.capital_tiers.length - 1].capital_usd;
+function gasTierOf(row) {
+var names = (row.chains || []).map(function (chain) { return chain.toLowerCase(); });
+if (names.indexOf('ethereum') >= 0) return E.gas_tiers[0];
+if (names.indexOf('solana') >= 0) return E.gas_tiers[1];
+return E.gas_tiers[2];
 }
-function econOf(row, implied) {
+
+/* The farm arithmetic at any deposit and drop share; the default scenario is the board's. */
+function econAt(row, implied, deposit, dropShare) {
 var weeks = weeksOf(row.age_days);
 var hours = E.setup_hours + E.weekly_hours * weeks;
-var capital = capitalOf(row.tvl_usd);
-var gas = E.gas_base_usd + E.gas_weekly_usd * weeks;
-var opportunity = capital * E.opportunity_rate * weeks / 52;
-var expected = implied * E.wallet_share;
-var net = expected - gas - opportunity;
+var tier = gasTierOf(row);
+var gas = tier.setup_usd + tier.weekly_usd * weeks;
+var carry = deposit * E.capital_rate * weeks / 52;
+var ratio = implied / Math.max(1, row.tvl_usd);
+var expected = deposit * dropShare * ratio;
+var net = expected - gas - carry;
 var perHour = net / hours;
+var tbill = deposit * E.tbill_rate * weeks / 52;
+var breakEven = (gas + carry) / Math.max(1e-9, deposit * ratio);
 var verdict = net >= E.farm_net_usd && perHour >= E.farm_per_hour_usd ? 'farm' : net >= E.thin_net_usd && perHour >= E.thin_per_hour_usd ? 'thin' : 'skip';
-return { weeks: weeks, hours: hours, capital: capital, gas: gas, opportunity: opportunity, expected: expected, net: net, perHour: perHour, verdict: verdict };
+return { weeks: weeks, hours: hours, tier: tier, gas: gas, carry: carry, ratio: ratio, expected: expected, net: net, perHour: perHour, tbill: tbill, breakEven: breakEven, verdict: verdict };
 }
+function econOf(row, implied) { return econAt(row, implied, E.deposit_usd, E.drop_share); }
 function intervalOf(launch, odds, implied) {
 var low = Math.max(1, Math.min(implied, Math.round(launch * Math.exp(V.q25) * odds)));
 var high = Math.max(low, Math.max(implied, Math.round(launch * Math.exp(V.q75) * odds)));
@@ -141,6 +154,22 @@ var boardSorted = D.rows.every(function (row, i) { return i === 0 || D.rows[i - 
 var stepsOk = D.rows.every(function (row) {
 return row.farm_steps.length >= 3 && row.farm_steps.length <= 12 && row.farm_steps.every(function (s) { return s.length >= 20 && s.length <= 600; });
 });
+var planSteps = D.rows[0] ? D.rows[0].farm_steps.length : 0;
+
+/* ---------------------------------------------------------------- scenario: deposit × drop share */
+
+var scenario = { deposit: E.deposit_usd, drop: E.drop_share };
+var ECON = {};
+function refreshScenario() {
+ECON = {};
+D.rows.forEach(function (row) { ECON[row.slug] = econAt(row, auditBySlug[row.slug].m.implied, scenario.deposit, scenario.drop); });
+var farm = 0, thin = 0, skip = 0;
+D.rows.forEach(function (row) { var v = ECON[row.slug].verdict; if (v === 'farm') farm += 1; else if (v === 'thin') thin += 1; else skip += 1; });
+$('#dropVal').textContent = pct(scenario.drop);
+$('#scRes').innerHTML = '<b>' + farm + '</b> farm · ' + thin + ' thin · ' + skip + ' skip at ' + full(scenario.deposit) + ' × ' + pct(scenario.drop);
+$('#kpis').innerHTML = kpisHtml(farm, thin, skip);
+renderBoard();
+}
 
 /* ---------------------------------------------------------------- chrome */
 
@@ -166,26 +195,45 @@ $('#headStats').innerHTML = stat('Median eventual odds', pct(D.stats.median_odds
 function kpi(label, value, note, tone) {
 return '<div class="kpi ' + (tone || '') + '"><span>' + label + '</span><strong>' + value + '</strong><p>' + note + '</p></div>';
 }
-$('#kpis').innerHTML =
-kpi('Snapshot protocols', COV.protocols, COV.trading + ' trading · ' + COV.pre_token + ' pre-token') +
+function kpisHtml(farm, thin, skip) {
+return kpi('Snapshot protocols', COV.protocols, COV.trading + ' trading · ' + COV.pre_token + ' pre-token') +
 kpi('Launch candidates', COV.scored, COV.tokenless_by_design + ' tokenless by design', 'hot') +
 kpi('Watchlist covered', COV.watchlist_covered + '/' + COV.watchlist, 'every listed slug scored', 'good') +
-kpi('Odds model AUC', O.auc.toFixed(2), O.n_peers + ' peers · Brier ' + O.brier.toFixed(3) + ' in · ' + O.held_out_brier.toFixed(3) + ' held out') +
-kpi('Comps held-out miss', '×' + V.loo_error_multiple, 'flat ×' + V.flat_loo_multiple + ' · walk ×' + V.walk_forward_multiple + ' · rank ' + V.loo_spearman) +
-kpi('Farmable rows', COV.verdicts.farm, COV.verdicts.thin + ' thin · ' + COV.verdicts.skip + ' skip', 'good');
+kpi('Odds model AUC', O.auc.toFixed(2), O.n_peers + ' peers · held-out Brier ' + O.held_out_brier.toFixed(3)) +
+kpi('Comps held-out miss', '×' + V.loo_error_multiple, 'flat ×' + V.flat_loo_multiple + ' · walk ×' + V.walk_forward_multiple) +
+kpi('Farmable rows', farm, thin + ' thin · ' + skip + ' skip at ' + money(scenario.deposit) + ' × ' + pct(scenario.drop), 'good');
+}
 
-/* The evidence strip: the out-of-sample numbers the board's ordering rests on. */
-$('#evidence').innerHTML =
-'<span class="ev-label">Out-of-sample evidence</span>' +
-'<span>terms kept <b>' + keptCount() + '</b></span>' +
-'<span>comps LOO <b>×' + V.loo_error_multiple + '</b> vs flat ×' + V.flat_loo_multiple + '</span>' +
-'<span>walk-forward <b>×' + V.walk_forward_multiple + '</b></span>' +
-'<span>rank <b>' + V.loo_spearman + '</b></span>' +
-'<span>odds AUC <b>' + O.auc.toFixed(2) + '</b></span>' +
-'<span>Brier in <b>' + O.brier.toFixed(3) + '</b> · held out <b>' + O.held_out_brier.toFixed(3) + '</b> vs ' + O.brier_base.toFixed(3) + ' base</span>' +
-'<span>P10–P90 coverage <b>' + pct(V.coverage_p10_p90) + '</b> / 80%</span>' +
-'<span>P25–P75 <b>' + pct(V.coverage_p25_p75) + '</b> / 50%</span>' +
-'<span>ranks <b>1–' + D.rows.length + '</b> · implied ' + (boardSorted ? 'never rises' : 'rises somewhere') + '</span>';
+/* The out-of-sample evidence panel: both term-survival tables, the held-out record, and what it misses. */
+function evTerms(model, kind) {
+var rows = (model.terms || []).map(function (term) {
+var a, b, c, d;
+if (kind === 'comps') {
+a = '×' + term.with_multiple; b = '×' + term.without_multiple; c = '×' + term.with_forward; d = '×' + term.without_forward;
+} else {
+a = term.with_brier.toFixed(3); b = term.without_brier.toFixed(3); c = term.with_forward.toFixed(3); d = term.without_forward.toFixed(3);
+}
+var mark = term.kept ? '<span class="keep yes">kept</span>' : '<span class="keep no">dropped</span>';
+return '<tr><td>' + esc(term.label) + '</td><td class="num">' + a + '</td><td class="num">' + b + '</td><td class="num">' + c + '</td><td class="num">' + d + '</td><td>' + mark + '</td></tr>';
+}).join('');
+return '<table class="ev-table"><thead><tr><th>term</th><th class="num">with</th><th class="num">without</th><th class="num">walk w.</th><th class="num">walk w/o</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+function evidenceHtml() {
+var compDropped = droppedWords(C, { size: 'size', growth: '7-day growth', sector: 'sector' });
+var oddsDropped = droppedWords(O, { size: 'size', age: 'age', growth: '7-day growth' });
+var dropped = [compDropped ? 'comps: ' + compDropped : '', oddsDropped ? 'odds: ' + oddsDropped : ''].filter(Boolean).join(' · ');
+return '<div class="ev-head"><span class="ev-label">Out-of-sample evidence</span><span class="ev-sub">each term re-fitted without it, on two held-out schemes · the numbers the ranking rests on</span></div>' +
+'<div class="ev-grid">' +
+'<div class="ev-block"><h4>Comps curve <em>median miss, lower is better</em></h4>' + evTerms(C, 'comps') + '</div>' +
+'<div class="ev-block"><h4>Launch odds <em>Brier, lower is better</em></h4>' + evTerms(O, 'odds') + '</div>' +
+'<div class="ev-block ev-rec"><h4>Held-out record</h4><ul class="ev-list">' +
+'<li>comps LOO <b>×' + V.loo_error_multiple + '</b> vs flat <b>×' + V.flat_loo_multiple + '</b> · walk-forward <b>×' + V.walk_forward_multiple + '</b> · rank <b>' + V.loo_spearman + '</b> on ' + V.n + ' tokens</li>' +
+'<li>odds AUC <b>' + O.auc.toFixed(2) + '</b> · Brier <b>' + O.held_out_brier.toFixed(3) + '</b> held out vs <b>' + O.brier_base.toFixed(3) + '</b> base rate on ' + O.n_peers + ' peers</li>' +
+'<li>coverage <b>' + pct(V.coverage_p10_p90) + '</b> inside P10–P90 (nominal 80%) · <b>' + pct(V.coverage_p25_p75) + '</b> inside P25–P75 (nominal 50%) — the P10–P90 band undercovers, and the page prints it</li>' +
+'<li>dropped by the tests: ' + (dropped || 'nothing') + '</li>' +
+'</ul></div></div>';
+}
+$('#evidence').innerHTML = evidenceHtml();
 
 /* The whole snapshot as one bar: every protocol in exactly one group, checked on this page. */
 var GROUP_SHORT = ['trading, priced', 'trading, ticker only', 'tokenless by design', 'scored on the board'];
@@ -204,7 +252,7 @@ var VIEWS = {
 board: {
 eyebrow: 'Launch board',
 title: 'Pre-token protocols, ranked by expected launch value',
-sub: 'Implied value = the comps curve\'s launch value × the peers\' eventual launch odds; the P25–P75 band is the curve\'s held-out residual interval. Open a row for its arithmetic and a seven-step, costed farm plan.'
+sub: 'Implied value = the comps curve\'s launch value × the peers\' eventual launch odds; the P25–P75 band is the curve\'s held-out residual interval. Net and $/hr are pro-rata farm arithmetic at the scenario above — move the deposit or the drop share and every row re-runs. Open a row for its break-even, its risk grid and a ' + planSteps + '-step, costed plan.'
 },
 live: {
 eyebrow: 'Market record',
@@ -214,7 +262,7 @@ sub: 'The comps curve is fitted on every token that records a market cap; these 
 method: {
 eyebrow: 'Method',
 title: 'The fitted model, its held-out tests and the ledger',
-sub: 'Both models are estimated inside the program from the sealed snapshot: a comps curve for launch value with a measured interval, a logistic record of who launches, and a per-row arithmetic for the farm verdict. Every snapshot protocol is accounted for, and the board carries a digest the page re-derives.'
+sub: 'Both models are estimated inside the program from the sealed snapshot: a comps curve for launch value with a measured interval, a logistic record of who launches, and a per-row pro-rata arithmetic for the farm verdict. Every snapshot protocol is accounted for, and the board carries a digest the page re-derives.'
 }
 };
 
@@ -246,18 +294,19 @@ age: function (r) { return r.age_days == null ? -1 : r.age_days; },
 odds: function (r) { return r.odds_eventual; },
 implied: function (r) { return r.implied_value_usd; },
 low: function (r) { return r.implied_low_usd; },
-net: function (r) { return r.net_usd; },
-perHour: function (r) { return r.per_hour_usd; },
-verdict: function (r) { return VERDICT_ORDER[r.verdict]; }
+net: function (r) { return ECON[r.slug] ? ECON[r.slug].net : r.net_usd; },
+perHour: function (r) { return ECON[r.slug] ? ECON[r.slug].perHour : r.per_hour_usd; },
+verdict: function (r) { return VERDICT_ORDER[ECON[r.slug] ? ECON[r.slug].verdict : r.verdict]; }
 };
 
 function filteredRows() {
 var q = state.search.trim().toLowerCase();
 return D.rows.filter(function (row) {
+var verdict = ECON[row.slug] ? ECON[row.slug].verdict : row.verdict;
 if (state.scope === 'watch' && !row.on_watchlist) return false;
 if (state.scope === 'offlist' && row.on_watchlist) return false;
 if (state.scope === 'early' && !(row.age_days != null && row.age_days < 365)) return false;
-if (state.scope !== 'all' && state.scope !== 'watch' && state.scope !== 'offlist' && state.scope !== 'early' && row.verdict !== state.scope) return false;
+if (state.scope !== 'all' && state.scope !== 'watch' && state.scope !== 'offlist' && state.scope !== 'early' && verdict !== state.scope) return false;
 if (state.category !== 'all' && row.category !== state.category) return false;
 if (q) {
 var hay = (row.name + ' ' + row.slug + ' ' + (row.category || '') + ' ' + row.chains.join(' ') + ' ' + (row.listed_at || '')).toLowerCase();
@@ -278,6 +327,7 @@ return out * dir;
 }
 
 function rowHtml(row) {
+var e = ECON[row.slug] || econOf(row, row.implied_value_usd);
 var changeClass = row.change_7d == null ? '' : row.change_7d >= 0 ? 'up' : 'down';
 var tag = row.on_watchlist ? '<span class="chip-watch">watch</span>' : row.rank <= 25 ? '<span class="chip-off">off-list</span>' : '';
 return '<tr data-slug="' + esc(row.slug) + '"' + (row.rank <= 3 ? ' class="top3"' : '') + '>' +
@@ -290,9 +340,9 @@ return '<tr data-slug="' + esc(row.slug) + '"' + (row.rank <= 3 ? ' class="top3"
 '<td class="num odds"><span class="meter" aria-hidden="true"><i style="width:' + Math.max(2, Math.min(100, row.odds_eventual * 100)).toFixed(1) + '%"></i></span>' + pct(row.odds_eventual) + '</td>' +
 '<td class="num implied">' + money(row.implied_value_usd) + '</td>' +
 '<td class="num range">' + money(row.implied_low_usd) + '–' + money(row.implied_high_usd) + '</td>' +
-'<td class="num net ' + (row.net_usd >= 0 ? 'pos' : 'neg') + '">' + rate(row.net_usd) + '</td>' +
-'<td class="num perhour ' + (row.per_hour_usd >= 0 ? 'pos' : 'neg') + '">' + rate(row.per_hour_usd) + '</td>' +
-'<td><span class="vchip ' + row.verdict + '">' + row.verdict + '</span></td>' +
+'<td class="num net ' + (e.net >= 0 ? 'pos' : 'neg') + '">' + signedMoney(e.net) + '</td>' +
+'<td class="num perhour ' + (e.perHour >= 0 ? 'pos' : 'neg') + '">' + rate(e.perHour) + '</td>' +
+'<td><span class="vchip ' + e.verdict + '">' + e.verdict + '</span></td>' +
 '</tr>';
 }
 
@@ -301,7 +351,7 @@ var rows = sortedRows(filteredRows());
 $('#rows').innerHTML = rows.map(rowHtml).join('');
 $('#count').textContent = rows.length + ' of ' + D.rows.length + ' candidates';
 var label = state.sort.key === 'rank' ? 'implied value, descending' : state.sort.key + (state.sort.dir === 1 ? ', ascending' : ', descending');
-$('#boardFoot').innerHTML = '<b>' + rows.length + '</b> rows shown · sorted by ' + esc(label) + ' · click a row for its arithmetic and farm plan · <b>' + agreed + '/' + D.rows.length + '</b> rows recomputed in this page agree with the board';
+$('#boardFoot').innerHTML = '<b>' + rows.length + '</b> rows shown · sorted by ' + esc(label) + ' · net and $/hr at ' + full(scenario.deposit) + ' × ' + pct(scenario.drop) + ' · click a row for its break-even, risk grid and ' + planSteps + '-step plan · <b>' + agreed + '/' + D.rows.length + '</b> rows recomputed in this page agree with the board';
 Array.prototype.forEach.call(document.querySelectorAll('.board thead th'), function (th) {
 var key = th.getAttribute('data-sort');
 th.classList.toggle('sorted', key === state.sort.key);
@@ -317,6 +367,76 @@ function stepHtml(text) {
 return esc(text).replace(/Cost: ([^.]*)\./g, 'Cost: <span class="cost">$1</span>.');
 }
 
+/* The scenario in a grid: every deposit row against every drop column at this row's own figures. */
+function riskGrid(row, implied) {
+var deposits = [1000, 10000, 50000, 100000];
+var drops = [0.03, 0.05, 0.07, 0.10, 0.15];
+var head = '<tr><th>deposit \\ drop</th>' + drops.map(function (drop) { return '<th>' + pct(drop) + '</th>'; }).join('') + '</tr>';
+var body = deposits.map(function (deposit) {
+return '<tr><td>' + full(deposit) + '</td>' + drops.map(function (drop) {
+var ec = econAt(row, implied, deposit, drop);
+var now = deposit === scenario.deposit && Math.abs(drop - scenario.drop) < 1e-9 ? ' now' : '';
+return '<td class="' + (ec.net >= 0 ? 'pos' : 'neg') + now + '">' + signedMoney(ec.net) + '</td>';
+}).join('') + '</tr>';
+}).join('');
+return '<table class="matrix"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
+
+/* Net against the weeks held, at the current deposit and drop share. */
+function weeksTable(row, implied) {
+var ec0 = econAt(row, implied, scenario.deposit, scenario.drop);
+var rows = [6, 8, 10, 12, 16].map(function (weeks) {
+var gas = ec0.tier.setup_usd + ec0.tier.weekly_usd * weeks;
+var carry = scenario.deposit * E.capital_rate * weeks / 52;
+var expected = ec0.expected;
+var net = expected - gas - carry;
+var hours = E.setup_hours + E.weekly_hours * weeks;
+var perHour = net / hours;
+return '<tr' + (weeks === ec0.weeks ? ' class="now"' : '') + '><td>' + weeks + ' wk</td><td class="num">' + full(expected) + '</td><td class="num">−' + full(gas + carry) + '</td><td class="num ' + (net >= 0 ? 'pos' : 'neg') + '">' + signedMoney(net) + '</td><td class="num ' + (perHour >= 0 ? 'pos' : 'neg') + '">' + rate(perHour) + '/h</td></tr>';
+}).join('');
+return '<table class="mini"><thead><tr><th>held</th><th class="num">expected drop</th><th class="num">gas + carry</th><th class="num">net</th><th class="num">rate</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+/* The nearest traded peers by TVL: what the market pays for a protocol this size. */
+function peersTable(row) {
+var peers = D.live.map(function (peer) { return { peer: peer, d: Math.abs(Math.log(Math.max(1, peer.tvl_usd) / Math.max(1, row.tvl_usd))) }; }).sort(function (a, b) { return a.d - b.d; }).slice(0, 3);
+var rows = peers.map(function (item) {
+var peer = item.peer;
+var fit = launchOf(peer);
+var miss = fit / Math.max(1, peer.mcap_usd);
+return '<tr><td>' + esc(peer.symbol || '—') + ' <span class="mut">' + esc(peer.name) + '</span></td><td class="num">' + money(peer.tvl_usd) + '</td><td class="num">' + peer.mcap_tvl.toFixed(2) + '×</td><td class="num">' + money(fit) + '</td><td class="num">×' + miss.toFixed(2) + '</td></tr>';
+}).join('');
+return '<table class="mini"><thead><tr><th>nearest peer</th><th class="num">TVL</th><th class="num">MC/TVL</th><th class="num">curve at its TVL</th><th class="num">curve /actual</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+/* What moves the row's implied value: one input at a time. */
+function sensitivityTable(row, m) {
+var growth = growthOf(row.change_7d);
+var age = ageYearsOf(row);
+var out = [];
+out.push(['TVL +30%', m.implied * Math.exp(C.tvl_elasticity * Math.log(1.3))]);
+out.push(['TVL −30%', m.implied * Math.exp(C.tvl_elasticity * Math.log(0.7))]);
+if (keptOf(C, 'growth')) {
+var growth2 = clamp(growth + 0.2, -0.5, 1.5);
+out.push(['7-day growth +20 pp', m.implied * Math.exp(C.growth_weight * (growth2 - growth))]);
+}
+var pNow = shareOf(row.tvl_usd, age, growth);
+var pEnd = shareOf(row.tvl_usd, Math.max(age + 0.5, O.oldest_years), growth);
+var odds2 = clamp((pEnd - pNow) / Math.max(1e-9, 1 - pNow), 0.02, 0.95);
+out.push(['age +6 months', m.implied * odds2 / Math.max(1e-9, m.odds)]);
+return '<table class="mini"><thead><tr><th>change, one at a time</th><th class="num">implied</th><th class="num">vs board</th></tr></thead><tbody>' + out.map(function (item) {
+var delta = (item[1] / Math.max(1, m.implied) - 1) * 100;
+return '<tr><td>' + esc(item[0]) + '</td><td class="num">' + money(item[1]) + '</td><td class="num ' + (delta >= 0 ? 'pos' : 'neg') + '">' + signedPct(delta) + '</td></tr>';
+}).join('') + '</tbody></table>';
+}
+
+/* Where the row's band would sit on the board: rank at the low end and at the high end. */
+function rankRange(row) {
+function rankOf(value) { var n = 0; D.rows.forEach(function (r) { if (r.implied_value_usd > value) n += 1; }); return n + 1; }
+var a = rankOf(row.implied_low_usd), b = rankOf(row.implied_high_usd);
+return '#' + Math.min(a, b) + ' – #' + Math.max(a, b);
+}
+
 function openDrawer(row) {
 var m = recompute(row);
 var growth = growthOf(row.change_7d);
@@ -327,7 +447,7 @@ var age = ageYearsOf(row);
 var now = shareOf(row.tvl_usd, age, growth);
 var oldest = Math.max(age, O.oldest_years);
 var end = shareOf(row.tvl_usd, oldest, growth);
-var e = m.econ;
+var e = econAt(row, m.implied, scenario.deposit, scenario.drop);
 var chips = '<span class="d-chip">Rank #' + row.rank + '</span>' +
 '<span class="d-chip">' + esc(row.category || 'Unclassified') + '</span>' +
 (row.on_watchlist ? '<span class="d-chip watch">watchlist</span>' : '<span class="d-chip">off-list</span>') +
@@ -341,7 +461,7 @@ var html = '<div class="d-head"><div>' +
 
 '<div class="d-value"><span>Implied launch value</span><strong>' + money(row.implied_value_usd) + '</strong>' +
 '<p>' + money(m.launch) + ' launch value × ' + pct(m.odds) + ' eventual odds</p>' +
-'<p class="d-range">P25–P75 ' + money(m.range.low) + ' – ' + money(m.range.high) + ' · the curve\'s held-out residual interval</p></div>' +
+'<p class="d-range">P25–P75 ' + money(m.range.low) + ' – ' + money(m.range.high) + ' · the curve\'s held-out residual interval · board rank at the band ends ' + rankRange(row) + '</p></div>' +
 
 '<div class="d-grid">' +
 '<div class="d-cell"><span>TVL</span><strong>' + full(row.tvl_usd) + '</strong></div>' +
@@ -350,20 +470,40 @@ var html = '<div class="d-head"><div>' +
 '<div class="d-cell"><span>Odds, eventual</span><strong>' + pct(m.odds) + '</strong></div>' +
 '</div>' +
 
-'<div class="d-card"><h3>Farm plan <span class="vchip ' + e.verdict + '" style="float:right">' + e.verdict + '</span></h3>' +
+'<div class="d-card"><h3>Farm arithmetic <span class="vchip ' + e.verdict + '" style="float:right">' + e.verdict + '</span></h3>' +
+'<div class="eq">expected drop = ' + full(scenario.deposit) + ' × ' + pct(scenario.drop) + ' × ' + e.ratio.toFixed(4) + ' implied / TVL<br>' +
+'gas (' + esc(e.tier.chain) + ') = $' + e.tier.setup_usd + ' + $' + e.tier.weekly_usd + ' × ' + e.weeks + ' wk = ' + full(e.gas) + '<br>' +
+'carry = ' + full(scenario.deposit) + ' × ' + (E.capital_rate * 100).toFixed(0) + '% × ' + e.weeks + '/52 = ' + full(e.carry) + '<br>' +
+'net = ' + full(e.expected) + ' − ' + full(e.gas + e.carry) + ' = <b>' + signedMoney(e.net) + '</b></div>' +
 '<div class="d-rows">' +
-'<div class="d-row"><span>Expected airdrop, 0.001% of FDV</span><b>' + full(e.expected) + '</b></div>' +
-'<div class="d-row"><span>Gas, ' + e.weeks + ' weeks</span><b>−' + full(e.gas) + '</b></div>' +
-'<div class="d-row"><span>Opportunity cost of ' + full(e.capital) + '</span><b>−$' + e.opportunity.toFixed(2) + '</b></div>' +
+'<div class="d-row"><span>Expected drop, pro rata at ' + pct(scenario.drop) + '</span><b>' + full(e.expected) + '</b></div>' +
+'<div class="d-row"><span>Gas, ' + e.weeks + ' weeks on ' + esc(e.tier.chain) + '</span><b>−' + full(e.gas) + '</b></div>' +
+'<div class="d-row"><span>Carrying cost of the deposit</span><b>−' + full(e.carry) + '</b></div>' +
 '<div class="d-row"><span>Time, setup plus weekly checks</span><b>' + e.hours.toFixed(1) + ' h</b></div>' +
-'<div class="d-row total"><span>Net</span><b>' + (e.net >= 0 ? '' : '−') + full(Math.abs(e.net)) + '</b></div>' +
+'<div class="d-row"><span>T-bill benchmark on the same money</span><b>' + full(e.tbill) + '</b></div>' +
+'<div class="d-row"><span>Break-even drop share</span><b>' + pct(e.breakEven) + '</b></div>' +
+'<div class="d-row total"><span>Net</span><b>' + signedMoney(e.net) + '</b></div>' +
 '<div class="d-row total"><span>Rate</span><b>' + rate(e.perHour) + '/h</b></div>' +
 '</div>' +
-'<p class="d-note">Verdict: farm at net ≥ ' + full(E.farm_net_usd) + ' and ≥ $' + E.farm_per_hour_usd + '/h; thin at net ≥ ' + full(E.thin_net_usd) + ' and ≥ $' + E.thin_per_hour_usd + '/h; otherwise skip. Assumes one wallet captures ' + (E.wallet_share * 100).toFixed(5).replace(/0+$/, '') + '% of FDV.</p></div>' +
+'<p class="d-note">Verdict: farm at net ≥ ' + full(E.farm_net_usd) + ' and ≥ $' + E.farm_per_hour_usd + '/h; thin at net ≥ ' + full(E.thin_net_usd) + ' and ≥ $' + E.thin_per_hour_usd + '/h; otherwise skip. The drop share is a scenario, not a forecast: below the break-even share the drop does not pay gas and carry. Move the deposit and drop share on the board to re-run this row.</p>' +
+riskGrid(row, m.implied) +
+'<p class="d-note">Net by deposit and drop share at this row\'s own implied / TVL (' + e.ratio.toFixed(4) + ') and ' + e.weeks + '-week hold; the outlined cell is the scenario on the board.</p></div>' +
 
-'<div class="d-card"><h3>Seven steps <b>each with a cost and a time</b></h3><ol class="steps">' +
+'<div class="d-card"><h3>Net by weeks held <b>at ' + full(scenario.deposit) + ' × ' + pct(scenario.drop) + '</b></h3>' +
+weeksTable(row, m.implied) +
+'<p class="d-note">The hold is a choice, not a fact: a longer hold costs more gas and carry but spans more snapshots. The board uses ' + e.weeks + ' weeks for a protocol of this age.</p></div>' +
+
+'<div class="d-card"><h3>' + row.farm_steps.length + ' steps <b>each with a cost and a time</b></h3><ol class="steps">' +
 row.farm_steps.map(function (step) { return '<li><p>' + stepHtml(step) + '</p></li>'; }).join('') +
 '</ol></div>' +
+
+'<div class="d-card"><h3>Nearest priced peers <b>by TVL</b></h3>' +
+peersTable(row) +
+'<p class="d-note">The three traded tokens closest to this protocol\'s TVL. "Curve at its TVL" is the comps curve\'s fitted value for that peer; "curve / actual" is the in-sample miss for that token. The whole curve\'s held-out miss is ×' + V.loo_error_multiple + ' leave-one-out and ×' + V.walk_forward_multiple + ' walk-forward; these three are shown for scale, not for validation.</p></div>' +
+
+'<div class="d-card"><h3>What moves the implied value <b>one input at a time</b></h3>' +
+sensitivityTable(row, m) +
+'<p class="d-note">Recomputed from the printed coefficients with the other inputs held at this row\'s values. A wide band and large single-input swings are the point: the board orders the field, it does not promise a number.</p></div>' +
 
 '<div class="d-card"><h3>The comps curve <b>' + C.n_tokens + ' traded tokens</b></h3>' +
 '<div class="eq">' + (function () {
@@ -373,32 +513,20 @@ if (keptOf(C, 'growth')) eq += '<br>&nbsp;&nbsp;+ (' + C.growth_weight.toFixed(3
 if (keptOf(C, 'sector')) eq += (effect >= 0 ? ' + ' : ' − ') + Math.abs(effect).toFixed(3) + ' sector';
 return eq + '<br>&nbsp;&nbsp;= ' + logValue.toFixed(3) + ' → launch value <b>' + money(m.launch) + '</b>';
 })() + '</div>' +
-'<div class="d-rows">' +
-'<div class="d-row"><span>ln TVL</span><b>' + logTvl.toFixed(3) + '</b></div>' +
-(keptOf(C, 'growth') ? '<div class="d-row"><span>Seven-day growth term, clipped</span><b>' + growth.toFixed(2) + '</b></div>' : '') +
-(keptOf(C, 'sector') ? '<div class="d-row"><span>Sector effect, log points</span><b>' + num3(effect) + '</b></div>' : '') +
-'<div class="d-row"><span>P25–P75 band, ×' + Math.exp(V.q25).toFixed(2) + ' to ×' + Math.exp(V.q75).toFixed(2) + '</span><b>' + money(m.launch * Math.exp(V.q25)) + ' – ' + money(m.launch * Math.exp(V.q75)) + '</b></div>' +
-'<div class="d-row total"><span>Fitted launch value</span><b>' + money(m.launch) + '</b></div>' +
-'</div>' +
 '<p class="d-note">The band is the leave-one-out residual interval, checked on the walk-forward folds: ' + pct(V.coverage_p10_p90) + ' of actuals inside P10–P90 (nominal 80%), ' + pct(V.coverage_p25_p75) + ' inside P25–P75 (nominal 50%). ' + (function () {
-var dropped = (C.terms || []).filter(function (term) { return !term.kept; }).map(function (term) { return term.label; });
-return dropped.length ? 'Dropped by the term-survival test: ' + dropped.join(', ') + '.' : 'All three terms survived the held-out test.';
+var dropped = droppedWords(C, { size: 'size', growth: '7-day growth', sector: 'sector' });
+return dropped ? 'Dropped by the term-survival test: ' + dropped + '.' : 'All three terms survived the held-out test.';
 })() + '</p></div>' +
 
 '<div class="d-card"><h3>Launch odds <b>AUC ' + O.auc.toFixed(2) + ' · Brier ' + O.brier.toFixed(3) + '</b></h3>' +
 '<div class="eq">P(token today) = ' + pct(now) + ' · P(token by the oldest peer, ' + oldest.toFixed(1) + 'y) = ' + pct(end) + '<br>' +
 'odds = (' + pct(end) + ' − ' + pct(now) + ') / (1 − ' + pct(now) + ') = <b>' + pct(m.odds) + '</b></div>' +
-'<div class="d-rows">' +
-'<div class="d-row"><span>Peer share at ' + age.toFixed(1) + ' years, fitted</span><b>' + pct(now) + '</b></div>' +
-'<div class="d-row"><span>Peer share at the oldest peer\'s age, fitted</span><b>' + pct(end) + '</b></div>' +
-'<div class="d-row total"><span>Eventual launch odds</span><b>' + pct(m.odds) + '</b></div>' +
-'</div>' +
 '<p class="d-note">The horizon is the oldest dated peer in the snapshot (' + O.oldest_years + ' years), not an arbitrary year. AUC on the ' + O.n_peers + ' peers; Brier ' + O.brier.toFixed(3) + ' in-sample and ' + O.held_out_brier.toFixed(3) + ' held out, against ' + O.brier_base.toFixed(3) + ' for the base rate. ' + (function () {
-var dropped = (O.terms || []).filter(function (term) { return !term.kept; }).map(function (term) { return term.label; });
-return dropped.length ? 'Dropped by the term-survival test: ' + dropped.join(', ') + '.' : 'All three terms survived the held-out test.';
+var dropped = droppedWords(O, { size: 'size', age: 'age', growth: '7-day growth' });
+return dropped ? 'Dropped by the term-survival test: ' + dropped + '.' : 'All three terms survived the held-out test.';
 })() + '</p></div>' +
 
-'<p class="d-note">This drawer recomputes the row from the fitted coefficients: launch value ' + money(m.launch) + ', odds ' + pct(m.odds) + ', implied ' + full(m.implied) + ' inside ' + full(m.range.low) + '–' + full(m.range.high) + '. The board carries ' + full(row.implied_value_usd) + ' with ' + full(row.implied_low_usd) + '–' + full(row.implied_high_usd) + '; ' + (auditBySlug[row.slug].ok ? 'the two agree.' : 'they differ.') + '</p>';
+'<p class="d-note">This drawer recomputes the row from the fitted coefficients: launch value ' + money(m.launch) + ', odds ' + pct(m.odds) + ', implied ' + full(m.implied) + ' inside ' + full(m.range.low) + '–' + full(m.range.high) + '. The board carries ' + full(row.implied_value_usd) + ' with ' + full(row.implied_low_usd) + '–' + full(row.implied_high_usd) + '; ' + (auditBySlug[row.slug].ok ? 'the two agree.' : 'they differ.') + ' The farm figures here are re-run at the board\'s scenario (' + full(scenario.deposit) + ' × ' + pct(scenario.drop) + ') and re-derive from the same arithmetic as the row.</p>';
 
 $('#drawerBody').innerHTML = html;
 $('#drawer').classList.add('open');
@@ -522,11 +650,20 @@ return '<tr><td>' + esc(group.label) + '</td><td class="num">' + group.n + '</td
 }
 
 function economicsHtml() {
-var tiers = E.capital_tiers.map(function (t) {
-return '<tr><td class="num">' + (t.tvl_min_usd === 0 ? 'under $100M' : '≥ ' + money(t.tvl_min_usd)) + '</td><td class="num">' + full(t.capital_usd) + '</td></tr>';
+var gas = E.gas_tiers.map(function (t) {
+return '<tr><td>' + esc(t.chain) + '</td><td class="num">$' + t.setup_usd + '</td><td class="num">$' + t.weekly_usd + '/week</td></tr>';
 }).join('');
-return '<table class="m-table"><thead><tr><th>TVL tier</th><th class="num">Position</th></tr></thead><tbody>' + tiers + '</tbody></table>' +
-'<p class="lead" style="margin-top:10px">Gas $' + E.gas_base_usd + ' up front plus $' + E.gas_weekly_usd + ' a week; ' + E.setup_hours + ' hours to set up plus ' + E.weekly_hours + ' a week; capital costs ' + (E.opportunity_rate * 100).toFixed(0) + '% a year forgone; hold ' + E.hold_base_weeks + ' to ' + E.hold_tiers[0].weeks + ' weeks by age (' + E.hold_unknown_weeks + ' when unlisted). Farm at net ≥ ' + full(E.farm_net_usd) + ' and ≥ $' + E.farm_per_hour_usd + '/h; thin at net ≥ ' + full(E.thin_net_usd) + ' and ≥ $' + E.thin_per_hour_usd + '/h.</p>';
+var holds = E.hold_tiers.map(function (t) {
+return '<tr><td>under ' + (t.younger_than_days / 365) + ' years</td><td class="num">' + t.weeks + ' weeks</td></tr>';
+}).join('');
+return '<div class="eq">expected drop = ' + full(E.deposit_usd) + ' × ' + pct(E.drop_share) + ' × implied / TVL (pro rata)<br>' +
+'net = expected drop − gas − ' + full(E.deposit_usd) + ' × ' + (E.capital_rate * 100).toFixed(0) + '% × weeks/52<br>' +
+'benchmark = the same deposit in ' + (E.tbill_rate * 100).toFixed(0) + '% T-bills</div>' +
+'<table class="m-table"><thead><tr><th>Settlement chain</th><th class="num">Gas to set up</th><th class="num">Weekly</th></tr></thead><tbody>' + gas + '</tbody></table>' +
+'<table class="m-table"><thead><tr><th>Age at entry</th><th class="num">Hold</th></tr></thead><tbody>' + holds +
+'<tr><td>3 years or older</td><td class="num">' + E.hold_base_weeks + ' weeks</td></tr>' +
+'<tr><td>unlisted</td><td class="num">' + E.hold_unknown_weeks + ' weeks</td></tr></tbody></table>' +
+'<p class="lead" style="margin-top:10px">' + E.setup_hours + ' hours to set up plus ' + E.weekly_hours + ' a week. Farm at net ≥ ' + full(E.farm_net_usd) + ' and ≥ $' + E.farm_per_hour_usd + '/h; thin at net ≥ ' + full(E.thin_net_usd) + ' and ≥ $' + E.thin_per_hour_usd + '/h. Each row prints its break-even drop share; the board\'s scenario controls re-run every row at any deposit and drop share.</p>';
 }
 
 function compsEquationHtml() {
@@ -564,12 +701,13 @@ return '<tr><td>' + esc(term.label) + '</td><td class="num">' + term.with_brier.
 function methodHtml() {
 var forwardN = V.n - Math.floor(V.n / 2);
 return '<div class="m-hero"><h3>One snapshot in, a ranked field of launches out</h3>' +
-'<p>Three pieces, each fitted or computed inside the program: the comps curve turns a protocol\'s ' + termWords(C, { size: 'TVL', growth: 'seven-day growth', sector: 'sector' }) + ' into a launch value and a measured interval; the launch record turns ' + termWords(O, { size: 'TVL', age: 'age', growth: 'seven-day growth' }) + ' into eventual odds; the farm arithmetic turns the two into a plan verdict. No sector multiple is hand-set and no protocol is special-cased.</p>' +
+'<p>Three pieces, each fitted or computed inside the program: the comps curve turns a protocol\'s ' + termWords(C, { size: 'TVL', growth: 'seven-day growth', sector: 'sector' }) + ' into a launch value and a measured interval; the launch record turns ' + termWords(O, { size: 'TVL', age: 'age', growth: 'seven-day growth' }) + ' into eventual odds; the farm arithmetic turns the two into a pro-rata verdict at an explicit deposit and drop share. No sector multiple is hand-set and no protocol is special-cased.</p>' +
 '<div class="m-formula">' +
 '<span class="m-pill">implied = launch value × odds</span>' +
 '<span class="m-pill">comps <b>' + C.n_tokens + '</b> tokens · held-out ×' + V.loo_error_multiple + '</span>' +
 '<span class="m-pill">launch record <b>' + O.n_peers + '</b> peers · AUC ' + O.auc.toFixed(2) + '</span>' +
 '<span class="m-pill">terms that survived <b>' + keptCount() + '</b></span>' +
+'<span class="m-pill">scenario <b>' + full(E.deposit_usd) + ' × ' + pct(E.drop_share) + '</b></span>' +
 '<span class="m-pill">ledger <b>' + D.accounting.total + '</b> protocols · digest ' + D.accounting.digest + '</span>' +
 '<span class="m-pill">board <b>' + COV.scored + '</b> candidates · watchlist ' + COV.watchlist_covered + '/' + COV.watchlist + '</span>' +
 '</div></div>' +
@@ -599,8 +737,8 @@ calibrationHtml() +
 
 '<div class="m-card"><h3>3 · Coverage <em>every protocol accounted for</em></h3>' + funnelHtml() + ledgerHtml() + '</div>' +
 
-'<div class="m-card"><h3>4 · The farm arithmetic <em>dollars per hour</em></h3>' +
-'<p class="lead">Expected airdrop = implied value × ' + (E.wallet_share * 100).toFixed(3) + '% for one wallet. Cost = gas + the capital\'s opportunity cost. Time = setup + weekly checks. The verdict is arithmetic under stated assumptions, not a promise.</p>' +
+'<div class="m-card"><h3>4 · The farm arithmetic <em>pro rata, not a promise</em></h3>' +
+'<p class="lead">Expected drop = deposit × drop share × implied / TVL: the launch is assumed to drop a stated share of its FDV to users, and the wallet\'s share of TVL sets its share of the drop. Cost = chain-priced gas + the deposit\'s carrying cost. Time = setup + weekly checks. The scenario controls on the board move both the deposit and the drop share.</p>' +
 economicsHtml() + '</div>' +
 
 '<div class="m-card wide"><h3>5 · What this page checks <em>board.json</em></h3><div class="checklist">' +
@@ -611,15 +749,16 @@ economicsHtml() + '</div>' +
 '<div class="check-item"><span class="ok">' + (digestOk ? '✓' : '×') + '</span><span><b>Board digest ' + D.accounting.digest + '</b>: re-derived in this page from rank|slug|implied on every row and compared with the ledger\'s copy.</span></div>' +
 '<div class="check-item"><span class="ok">' + (V.coverage_p10_p90 >= 0.7 && V.coverage_p10_p90 <= 0.9 ? '✓' : '×') + '</span><span><b>Interval honesty</b>: the P10–P90 band covers ' + pct(V.coverage_p10_p90) + ' of walk-forward actuals against a nominal 80%.</span></div>' +
 '<div class="check-item"><span class="ok">✓</span><span><b>Term survival</b>: ' + keptCount() + ' terms kept; every dropped term is printed with its with/without held-out numbers, and the published coefficients are the refit on the survivors.</span></div>' +
-'<div class="check-item"><span class="ok">' + (stepsOk ? '✓' : '×') + '</span><span><b>Farm plans</b>: every row carries seven steps, each with a cost and a time, inside the gate\'s length bounds.</span></div>' +
+'<div class="check-item"><span class="ok">' + (stepsOk ? '✓' : '×') + '</span><span><b>Farm plans</b>: every row carries ' + planSteps + ' steps, each with a cost and a time, inside the gate\'s length bounds.</span></div>' +
 '<div class="check-item"><span class="ok">' + (D.rows.length >= 100 && D.rows.length <= 4000 ? '✓' : '×') + '</span><span><b>Board size ' + D.rows.length + '</b>: inside the 100–4,000 row bound.</span></div>' +
 '</div>' +
-'<p class="lead" style="margin-top:12px">Reading the board: implied value is a centered estimate for a protocol of this size, growth and sector, its P25–P75 band is the curve\'s measured spread, and the odds are the peers\' record, not a forecast. The farm verdict says whether the plan clears its own costs at the stated wallet share; a skip is still a candidate with a plan. "Off-list" marks a row the model surfaced beyond the watchlist: the watchlist is the floor, not the ceiling.</p></div>' +
+'<p class="lead" style="margin-top:12px">Reading the board: implied value is a centered estimate for a protocol of this size, growth and sector, its P25–P75 band is the curve\'s measured spread, and the odds are the peers\' record, not a forecast. The farm verdict says whether a pro-rata drop at the board\'s scenario clears the plan\'s own costs; a skip is still a candidate with a plan. "Off-list" marks a row the model surfaced beyond the watchlist: the watchlist is the floor, not the ceiling.</p></div>' +
 
 '<div class="m-card wide"><h3>6 · Top of the board <em>the first ten rows</em></h3>' +
-'<table class="m-table"><thead><tr><th>#</th><th>Protocol</th><th>Sector</th><th class="num">TVL</th><th class="num">Launch value</th><th class="num">Odds</th><th class="num">Implied</th><th class="num">P25–P75</th><th class="num">$/h</th><th>Verdict</th></tr></thead><tbody>' +
+'<table class="m-table"><thead><tr><th>#</th><th>Protocol</th><th>Sector</th><th class="num">TVL</th><th class="num">Launch value</th><th class="num">Odds</th><th class="num">Implied</th><th class="num">P25–P75</th><th class="num">Net</th><th>Verdict</th></tr></thead><tbody>' +
 D.rows.slice(0, 10).map(function (row) {
-return '<tr><td class="num">' + row.rank + '</td><td>' + esc(row.name) + '</td><td>' + esc(row.category || '—') + '</td><td class="num">' + money(row.tvl_usd) + '</td><td class="num">' + money(row.launch_value_usd) + '</td><td class="num">' + pct(row.odds_eventual) + '</td><td class="num">' + money(row.implied_value_usd) + '</td><td class="num">' + money(row.implied_low_usd) + '–' + money(row.implied_high_usd) + '</td><td class="num">' + rate(row.per_hour_usd) + '</td><td><span class="vchip ' + row.verdict + '">' + row.verdict + '</span></td></tr>';
+var ec = ECON[row.slug] || econOf(row, row.implied_value_usd);
+return '<tr><td class="num">' + row.rank + '</td><td>' + esc(row.name) + '</td><td>' + esc(row.category || '—') + '</td><td class="num">' + money(row.tvl_usd) + '</td><td class="num">' + money(row.launch_value_usd) + '</td><td class="num">' + pct(row.odds_eventual) + '</td><td class="num">' + money(row.implied_value_usd) + '</td><td class="num">' + money(row.implied_low_usd) + '–' + money(row.implied_high_usd) + '</td><td class="num">' + signedMoney(ec.net) + '</td><td><span class="vchip ' + ec.verdict + '">' + ec.verdict + '</span></td></tr>';
 }).join('') + '</tbody></table></div>' +
 '</div>';
 }
@@ -659,6 +798,15 @@ state.category = event.target.value;
 renderBoard();
 });
 
+$('#deposit').addEventListener('change', function (event) {
+scenario.deposit = Number(event.target.value);
+refreshScenario();
+});
+$('#drop').addEventListener('input', function (event) {
+scenario.drop = Number(event.target.value) / 100;
+refreshScenario();
+});
+
 document.querySelector('.board thead').addEventListener('click', function (event) {
 var th = event.target.closest('th[data-sort]');
 if (!th) return;
@@ -687,7 +835,7 @@ $('#search').focus();
 });
 
 initCategories();
-renderBoard();
+refreshScenario();
 renderLive();
 $('#methodBody').innerHTML = methodHtml();
 setView('board');

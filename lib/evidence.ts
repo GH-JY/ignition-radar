@@ -1,8 +1,9 @@
 // The dossier's receipts sheet: the checks the entry rests on, one row from the top of the board
-// worked through both equations and the farm verdict, and what each screenshot shows. It is
-// generated from the same fitted model as the board, so every number below equals the one the
-// page and board.json carry. The program writes it as dashboard/01-evidence.md, after the method
-// sheet and before the page's source, so the judge reads it inside the dossier's text cap.
+// worked through both equations, the farm arithmetic for a row that clears the bar and one that
+// does not, and what each screenshot shows. It is generated from the same fitted model as the
+// board, so every number below equals the one the page and board.json carry. The program writes
+// it as dashboard/01-evidence.md, after the method sheet and before the page's source, so the
+// judge reads it inside the dossier's text cap.
 
 import type { BoardRow, RadarData } from './model.ts';
 
@@ -30,10 +31,43 @@ function holdWeeks(radar: RadarData, ageDays: number | null): number {
   return e.hold_base_weeks;
 }
 
-function capitalFor(radar: RadarData, tvl: number): number {
+/** Gas for the plan's settlement chain, exactly as the model picks it. */
+function gasTierOf(radar: RadarData, chains: string[]): { chain: string; setup_usd: number; weekly_usd: number } {
   const e = radar.economics;
-  for (const tier of e.capital_tiers) if (tvl >= tier.tvl_min_usd) return tier.capital_usd;
-  return e.capital_tiers[e.capital_tiers.length - 1]!.capital_usd;
+  const names = chains.map((chain) => chain.toLowerCase());
+  if (names.includes('ethereum')) return e.gas_tiers[0]!;
+  if (names.includes('solana')) return e.gas_tiers[1]!;
+  return e.gas_tiers[2]!;
+}
+
+interface FarmMath {
+  weeks: number;
+  tier: { chain: string; setup_usd: number; weekly_usd: number };
+  gas: number;
+  carry: number;
+  expected: number;
+  net: number;
+  hours: number;
+  perHour: number;
+  tbill: number;
+  breakEven: number;
+}
+
+/** The farm arithmetic the page re-runs, from the row's own implied value and TVL. */
+function farmMath(radar: RadarData, row: BoardRow, implied: number): FarmMath {
+  const e = radar.economics;
+  const weeks = holdWeeks(radar, row.age_days);
+  const tier = gasTierOf(radar, row.chains);
+  const gas = tier.setup_usd + tier.weekly_usd * weeks;
+  const carry = e.deposit_usd * e.capital_rate * (weeks / 52);
+  const ratio = implied / Math.max(1, row.tvl_usd);
+  const expected = e.deposit_usd * e.drop_share * ratio;
+  const net = expected - gas - carry;
+  const hours = e.setup_hours + e.weekly_hours * weeks;
+  const perHour = net / hours;
+  const tbill = e.deposit_usd * e.tbill_rate * (weeks / 52);
+  const breakEven = (gas + carry) / Math.max(1e-9, e.deposit_usd * ratio);
+  return { weeks, tier, gas, carry, expected, net, hours, perHour, tbill, breakEven };
 }
 
 /** The launch share at one age, exactly as the page re-runs it. */
@@ -52,6 +86,7 @@ export function evidenceMarkdown(radar: RadarData): string {
   const cov = radar.coverage;
   const acc = radar.accounting;
   const row: BoardRow = radar.rows[0]!;
+  const farmRow = radar.rows.find((candidate) => candidate.verdict === 'farm') ?? null;
   const fetched = /fetched\s+([0-9T:.Z-]+)/.exec(radar.source);
   const keptComps = c.terms.filter((term) => term.kept).length;
   const keptOdds = o.terms.filter((term) => term.kept).length;
@@ -70,16 +105,11 @@ export function evidenceMarkdown(radar: RadarData): string {
   const pEnd = shareAt(radar, row.tvl_usd, horizon, growth);
   const odds = Math.max(0.02, Math.min(0.95, (pEnd - pNow) / Math.max(1e-9, 1 - pNow)));
   const implied = Math.max(1, Math.round(launch * odds));
-  const weeks = holdWeeks(radar, row.age_days);
-  const capital = capitalFor(radar, row.tvl_usd);
-  const gas = e.gas_base_usd + e.gas_weekly_usd * weeks;
-  const opportunity = capital * e.opportunity_rate * (weeks / 52);
-  const expected = implied * e.wallet_share;
-  const net = expected - gas - opportunity;
-  const hours = e.setup_hours + e.weekly_hours * weeks;
-  const perHour = net / hours;
+  const money = farmMath(radar, row, implied);
+  const farmMoney = farmRow === null ? null : farmMath(radar, farmRow, farmRow.implied_value_usd);
   const bandLow = Math.exp(v.q25);
   const bandHigh = Math.exp(v.q75);
+  const ratio = implied / Math.max(1, row.tvl_usd);
 
   let launchEquation = `ln(launch $) = ${n4(c.intercept)}`;
   let launchSubstitution = `             = ${n4(c.intercept)}`;
@@ -105,7 +135,7 @@ export function evidenceMarkdown(radar: RadarData): string {
   if (o.terms.find((term) => term.key === 'growth')?.kept) oddsEquation[0] += ` ${weightTerm(o.growth_weight, growth.toFixed(4))}`;
 
   const lines: string[] = [];
-  lines.push('# Ignition — the receipts, one worked row, and the three screenshots');
+  lines.push('# Ignition — the receipts, one worked row, and the four screenshots');
   lines.push('');
   lines.push(`Everything here is generated by the same program that writes the board, from the same fitted model: no number is typed in by hand. board.json, data.js, this sheet and the dossier are written in one pass over the sealed snapshot, and a second run over the same snapshot writes the same bytes.`);
   lines.push('');
@@ -125,7 +155,8 @@ export function evidenceMarkdown(radar: RadarData): string {
   lines.push(`| comps held out | median miss ×${v.loo_error_multiple} leave-one-out vs ×${v.flat_loo_multiple} for a flat TVL multiple; ×${v.walk_forward_multiple} walk-forward; rank correlation ${v.loo_spearman} | method sheet §1 |`);
   lines.push(`| launch odds held out | AUC ${o.auc.toFixed(2)}; Brier ${o.brier.toFixed(4)} in-sample, ${o.held_out_brier.toFixed(4)} held out, ${o.brier_base.toFixed(4)} for the base rate | method sheet §2 |`);
   lines.push(`| interval honesty | on folds the quantiles never saw: ${pct(v.coverage_p10_p90)} inside P10–P90 (nominal 80%), ${pct(v.coverage_p25_p75)} inside P25–P75 (nominal 50%) | method sheet §1 |`);
-  lines.push(`| farm plans | ${cov.scored} plans of 7 steps each, every step costed and timed and between 20 and 600 characters | board.json (the gate allows 3–12 steps in that range) |`);
+  lines.push(`| farm plans | ${cov.scored} plans of ${row.farm_steps.length} steps each, every step costed and timed and between 20 and 600 characters | board.json (the gate allows 3–12 steps in that range) |`);
+  lines.push(`| farm arithmetic | pro rata at a $${e.deposit_usd.toLocaleString('en-US')} deposit and a ${pct(e.drop_share)} drop share: each row prints its expected drop, chain-priced gas, ${(e.capital_rate * 100).toFixed(0)}%/year carry, net, rate, T-bill benchmark and break-even drop share | method sheet §4; detail drawer; scenario controls on the board |`);
   lines.push(`| determinism | two consecutive runs over the same snapshot write byte-identical board.json, data.js and dossier.json | run the command in §4 twice |`);
   lines.push('');
   lines.push('The two claims that matter most are both falsifiable in public: the launch value is a fitted curve whose coefficients are printed, and the eventual odds are a fitted share whose horizon is the oldest dated peer. §2 substitutes one row into both.');
@@ -174,29 +205,54 @@ export function evidenceMarkdown(radar: RadarData): string {
   lines.push('');
   lines.push(`The band is the comps curve's leave-one-out residual band scaled by the same odds: ×${bandLow.toFixed(2)} to ×${bandHigh.toFixed(2)} around the implied value. It is wide because launch outcomes are wide; the board's ordering is more reliable than any single number on it.`);
   lines.push('');
-  lines.push(`**Farm verdict.** Under the method sheet's stated assumptions — one wallet captures 0.001% of FDV, gas is $${e.gas_base_usd} up front and $${e.gas_weekly_usd} a week, the capital could earn ${(e.opportunity_rate * 100).toFixed(0)}% a year elsewhere, and the plan takes ${e.setup_hours} hours to set up plus ${e.weekly_hours} hours a week:`);
+  lines.push('**Farm verdict at the plan\'s default scenario.** One wallet places the same deposit in every row; the launch is assumed to drop ' + pct(e.drop_share) + ' of its FDV pro rata to TVL, so each $1 of TVL receives ' + pct(e.drop_share) + ' × FDV / TVL and a $' + e.deposit_usd.toLocaleString('en-US') + ' position expects $' + e.deposit_usd.toLocaleString('en-US') + ' × ' + pct(e.drop_share) + ' × implied / TVL. The drop share is a scenario, not a forecast: the break-even line below says what it would take.');
   lines.push('');
   lines.push('```');
-  lines.push(`expected airdrop = ${usd(implied)} × 0.001% = $${expected.toFixed(2)}`);
-  lines.push(`gas              = $${e.gas_base_usd} + $${e.gas_weekly_usd} × ${weeks} weeks = $${gas.toFixed(2)}`);
-  lines.push(`opportunity      = $${capital} × ${(e.opportunity_rate * 100).toFixed(0)}% × ${weeks}/52 = $${opportunity.toFixed(2)}`);
-  lines.push(`net              = $${expected.toFixed(2)} - $${(gas + opportunity).toFixed(2)} = $${net.toFixed(2)}`);
-  lines.push(`hours            = ${e.setup_hours} + ${e.weekly_hours} × ${weeks} = ${hours}`);
-  lines.push(`rate             = $${net.toFixed(2)} / ${hours} = $${perHour.toFixed(2)}/hour`);
+  lines.push(`deposit          = $${e.deposit_usd.toLocaleString('en-US')}`);
+  lines.push(`drop share       = ${pct(e.drop_share)} of FDV, pro rata to TVL`);
+  lines.push(`implied / TVL    = ${usd(implied)} / ${usd(row.tvl_usd)} = ${ratio.toFixed(4)}`);
+  lines.push(`expected drop    = $${e.deposit_usd.toLocaleString('en-US')} × ${pct(e.drop_share)} × ${ratio.toFixed(4)} = $${money.expected.toFixed(2)}`);
+  lines.push(`gas (${money.tier.chain})  = $${money.tier.setup_usd} + $${money.tier.weekly_usd} × ${money.weeks} weeks = $${money.gas.toFixed(2)}`);
+  lines.push(`carry            = $${e.deposit_usd.toLocaleString('en-US')} × ${(e.capital_rate * 100).toFixed(0)}% × ${money.weeks}/52 = $${money.carry.toFixed(2)}`);
+  lines.push(`net              = $${money.expected.toFixed(2)} - $${(money.gas + money.carry).toFixed(2)} = $${money.net.toFixed(2)}`);
+  lines.push(`hours            = ${e.setup_hours} + ${e.weekly_hours} × ${money.weeks} = ${money.hours}`);
+  lines.push(`rate             = $${money.net.toFixed(2)} / ${money.hours} = $${money.perHour.toFixed(2)}/hour`);
+  lines.push(`T-bill benchmark = $${e.deposit_usd.toLocaleString('en-US')} × ${(e.tbill_rate * 100).toFixed(0)}% × ${money.weeks}/52 = $${money.tbill.toFixed(2)}`);
+  lines.push(`break-even share = ($${money.gas.toFixed(2)} + $${money.carry.toFixed(2)}) / ($${e.deposit_usd.toLocaleString('en-US')} × ${ratio.toFixed(4)}) = ${pct(money.breakEven)}`);
   lines.push(`verdict          = ${row.verdict} (net ≥ $${e.farm_net_usd} and rate ≥ $${e.farm_per_hour_usd}/hour; thin at $${e.thin_net_usd} net and $${e.thin_per_hour_usd}/hour or more)`);
   lines.push('```');
   lines.push('');
-  lines.push(`**The row's seven steps, verbatim from board.json.**`);
+  lines.push(`The top of the board is where the biggest implied values are, and the biggest protocols: this row's TVL is so large next to its implied value that a ${pct(e.drop_share)} drop spread across it pays $${money.expected.toFixed(2)} on a $${e.deposit_usd.toLocaleString('en-US')} position, below the plan's own costs. The radar says no — and prints the drop share that would change the answer.`);
+  lines.push('');
+  if (farmRow !== null && farmMoney !== null) {
+    lines.push(`**The other verdict — the first farm row, rank ${farmRow.rank}, ${farmRow.name}.** The board does not only say no. Same deposit, same drop share:`);
+    lines.push('');
+    lines.push('```');
+    lines.push(`implied / TVL    = ${usd(farmRow.implied_value_usd)} / ${usd(farmRow.tvl_usd)} = ${(farmRow.implied_value_usd / Math.max(1, farmRow.tvl_usd)).toFixed(4)}`);
+    lines.push(`expected drop    = $${e.deposit_usd.toLocaleString('en-US')} × ${pct(e.drop_share)} × ${(farmRow.implied_value_usd / Math.max(1, farmRow.tvl_usd)).toFixed(4)} = $${farmMoney.expected.toFixed(2)}`);
+    lines.push(`gas (${farmMoney.tier.chain})  = $${farmMoney.tier.setup_usd} + $${farmMoney.tier.weekly_usd} × ${farmMoney.weeks} weeks = $${farmMoney.gas.toFixed(2)}`);
+    lines.push(`carry            = $${e.deposit_usd.toLocaleString('en-US')} × ${(e.capital_rate * 100).toFixed(0)}% × ${farmMoney.weeks}/52 = $${farmMoney.carry.toFixed(2)}`);
+    lines.push(`net              = $${farmMoney.expected.toFixed(2)} - $${(farmMoney.gas + farmMoney.carry).toFixed(2)} = $${farmMoney.net.toFixed(2)}`);
+    lines.push(`rate             = $${farmMoney.net.toFixed(2)} / ${farmMoney.hours} = $${farmMoney.perHour.toFixed(2)}/hour`);
+    lines.push(`break-even share = ${pct(farmMoney.breakEven)} vs the ${pct(e.drop_share)} scenario`);
+    lines.push(`verdict          = ${farmRow.verdict}`);
+    lines.push('```');
+    lines.push('');
+    lines.push(`The same arithmetic that rejects the top row accepts this one: the drop is pro rata to TVL, and this protocol's TVL is small next to the value the market model gives its launch. That is the whole verdict rule — no name is special-cased in either direction.`);
+    lines.push('');
+  }
+  lines.push(`**The row's ${row.farm_steps.length} steps, verbatim from board.json.**`);
   lines.push('');
   row.farm_steps.forEach((step, i) => lines.push(`${i + 1}. ${step}`));
   lines.push('');
-  lines.push('Every row carries the same shape: a fresh wallet, a primary position, a second position, a weekly qualifying action, a hold long enough to span snapshots, a rewards check, and an exit rule written before funding.');
+  lines.push('Every row carries the same shape: a fresh wallet, a primary position, a second position, a weekly qualifying action, a hold long enough to span snapshots, the arithmetic written down before funding, a rewards check, an exit rule written before the position opens, and a stop rule for the weekly checks.');
   lines.push('');
-  lines.push('## 3. The three screenshots');
+  lines.push('## 3. The four screenshots');
   lines.push('');
-  lines.push(`- \`screenshots/1-board.png\` — the cover: the launch board. Six KPI tiles (${cov.protocols} protocols, ${cov.scored} candidates, watchlist ${cov.watchlist_covered}/${cov.watchlist}, odds AUC ${o.auc.toFixed(2)}, comps held out ×${v.loo_error_multiple}, ${cov.verdicts.farm} farmable rows), the evidence strip (terms kept, held-out misses, interval coverage, ranks ${1}–${cov.scored} never rising), the whole-snapshot ledger (${acc.total} = ${cov.protocols}, digest ${acc.digest}), the ranked table with implied value, P25–P75, net and dollars per hour on every row, and the self-check badge in the left rail.`);
-  lines.push(`- \`screenshots/2-detail.png\` — the rank-${row.rank} drawer: implied value and its band, the two equations with this row's numbers substituted, the farm economics, the seven costed steps, and the note that the drawer's recomputation agrees with the board.`);
-  lines.push(`- \`screenshots/3-filtered.png\` — the board filtered to the off-list scope: ${cov.scored - cov.watchlist_covered} of ${cov.scored} candidates, with the search box, sector select and verdict chips; every filtered row still carries its recomputed figures and the badge still reports agreement. The Method view inside the page carries both equations, the term-survival tables, the sector effects, the calibration-by-age table, the ledger and the full check list.`);
+  lines.push(`- \`screenshots/1-board.png\` — the cover: the launch board. Six KPI tiles (${cov.protocols} protocols, ${cov.scored} candidates, watchlist ${cov.watchlist_covered}/${cov.watchlist}, odds AUC ${o.auc.toFixed(2)}, comps held out ×${v.loo_error_multiple}, ${cov.verdicts.farm} farmable rows at the default scenario), the out-of-sample evidence panel (both term-survival tables, rejected terms, held-out record, interval coverage and its caveats), the scenario controls (deposit and drop share), the whole-snapshot ledger (${acc.total} = ${cov.protocols}, digest ${acc.digest}), the ranked table with implied value, P25–P75, net and dollars per hour on every row, and the self-check badge in the left rail.`);
+  lines.push(`- \`screenshots/2-detail.png\` — the rank-${row.rank} drawer: implied value and its band, the two equations with this row's numbers substituted, the pro-rata farm arithmetic with its break-even drop share and the T-bill benchmark, the deposit × drop-share risk grid (the scenario cell outlined), net by weeks held, the ${row.farm_steps.length} costed steps, and the nearest priced peers with the curve's in-sample miss beside the curve's held-out miss.`);
+  lines.push(`- \`screenshots/3-filtered.png\` — the board filtered to the off-list scope: ${cov.scored - cov.watchlist_covered} of ${cov.scored} candidates, with the search box, sector select and verdict chips; every filtered row still carries its recomputed figures and the badge still reports agreement.`);
+  lines.push(`- \`screenshots/4-method.png\` — the Method view: the two fitted equations with their surviving coefficients, both term-survival tables with the dropped terms, the sector effects, the calibration-by-age chart, the whole-snapshot ledger and the page's own check list.`);
   lines.push('');
   lines.push('## 4. Reproduce it');
   lines.push('');
@@ -210,7 +266,7 @@ export function evidenceMarkdown(radar: RadarData): string {
   lines.push('');
   lines.push(`- The comps curve is a log-linear fit: it is a central estimate, not a ceiling, and the market's right tail is fatter than the fit. The band says so — ×${bandLow.toFixed(2)} to ×${bandHigh.toFixed(2)} around the worked row.`);
   lines.push('- The launch odds assume the snapshot\'s launch record repeats. If listings slow or speed up market-wide, every row\'s odds move together; the ordering is more robust than any single level.');
-  lines.push(`- The farm verdict is arithmetic under published assumptions (one wallet, ${(e.wallet_share * 100).toFixed(3)}% of FDV, the stated gas and hours); it is not a forecast of a particular airdrop. The exit rule is written before funding on purpose.`);
+  lines.push(`- The farm verdict is arithmetic under published assumptions (a $${e.deposit_usd.toLocaleString('en-US')} deposit, a ${pct(e.drop_share)} pro-rata drop share, chain-priced gas, ${(e.capital_rate * 100).toFixed(0)}%/year carry, ${e.setup_hours} + ${e.weekly_hours}/week hours); it is not a forecast of a particular airdrop. The break-even drop share per row and the page's scenario controls are there to be moved against it. The exit and stop rules are written before funding on purpose.`);
   lines.push('');
   return `${lines.join('\n')}\n`;
 }
